@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="360" viewBox="0 0 960 360">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#0f172a"/>
+      <stop offset="100%" stop-color="#1f2937"/>
+    </linearGradient>
+    <style>
+      .panel { fill: #111827; stroke: #334155; stroke-width: 1.5; }
+      .text { font: 14px sans-serif; fill: #e2e8f0; }
+      .title { font: 16px sans-serif; font-weight: 600; fill: #f8fafc; }
+      .accent { fill: #38bdf8; }
+      .muted { fill: #94a3b8; }
+      .chip { fill: #0ea5e9; }
+    </style>
+  </defs>
+
+  <rect width="960" height="360" fill="url(#bg)"/>
+
+  <rect class="panel" x="60" y="50" width="360" height="260" rx="12"/>
+  <text class="title" x="90" y="90">CMS Editor</text>
+  <rect x="90" y="115" width="300" height="30" rx="6" fill="#1f2937"/>
+  <text class="text" x="105" y="136">Hero headline</text>
+  <rect x="90" y="160" width="300" height="30" rx="6" fill="#1f2937"/>
+  <text class="text" x="105" y="181">CTA button label</text>
+  <rect x="90" y="205" width="300" height="70" rx="8" fill="#1f2937"/>
+  <text class="text" x="105" y="230">Generated section HTML</text>
+
+  <rect class="panel" x="540" y="50" width="360" height="260" rx="12"/>
+  <text class="title" x="570" y="90">Codex Bridge</text>
+  <rect x="570" y="115" width="300" height="26" rx="6" fill="#0b1220"/>
+  <text class="text" x="585" y="133">/chat/sessions</text>
+  <rect x="570" y="151" width="300" height="26" rx="6" fill="#0b1220"/>
+  <text class="text" x="585" y="169">/chat/sessions/:id/messages</text>
+  <rect x="570" y="187" width="300" height="26" rx="6" fill="#0b1220"/>
+  <text class="text" x="585" y="205">/runtime/info</text>
+  <rect x="570" y="223" width="300" height="26" rx="6" fill="#0b1220"/>
+  <text class="text" x="585" y="241">/v1/* proxy</text>
+
+  <rect x="440" y="155" width="60" height="6" rx="3" class="chip"/>
+  <circle cx="440" cy="158" r="7" class="accent"/>
+  <circle cx="500" cy="158" r="7" class="accent"/>
+
+  <text class="text muted" x="410" y="130">SSE stream</text>
+</svg>
