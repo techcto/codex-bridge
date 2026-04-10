@@ -6,6 +6,14 @@
 
 This repo provides a CMS-friendly Codex runtime bridge. It exposes a small REST + SSE surface that content platforms can call for chat sessions, auth, runtime info, and streaming events.
 
+Supported runtime providers:
+
+- `openai`
+- `ollama`
+- `vllm`
+- `osirus`
+- `openai_compatible`
+
 ## Why This Exists
 
 Most CMS platforms need Codex to fit into their own auth, UI, and content workflows. This bridge keeps the integration light: the CMS owns permissions and content actions, while the runtime focuses on execution and streaming.
@@ -64,6 +72,7 @@ This starts the bridge on port `4318` and mounts the current repo into the conta
 | `GET` | `/runtime/info` | Runtime metadata |
 | `GET` | `/runtime/config` | Current runtime config |
 | `POST` | `/runtime/config` | Update runtime config |
+| `ANY` | `/v1/*` | Proxy OpenAI-compatible upstream routes |
 | `POST` | `/chat/sessions` | Create a session |
 | `GET` | `/chat/sessions/:id` | Read a session |
 | `GET` | `/chat/sessions/:id/stream` | SSE stream |
@@ -84,6 +93,19 @@ This starts the bridge on port `4318` and mounts the current repo into the conta
 
 ```bash
 curl -s http://localhost:4318/runtime/info | jq .
+```
+
+Point the bridge at an Osirus agent-scoped compatibility route:
+
+```bash
+curl -s -X POST http://localhost:4318/runtime/config \
+  -H "Content-Type: application/json" \
+  -d '{
+    "runtime_provider": "osirus",
+    "auth_mode": "api_key",
+    "provider_api_base_url": "https://example.osirus.ai/api/agents/AGENT_ID/v1",
+    "provider_api_key": "YOUR_API_KEY"
+  }' | jq .
 ```
 
 Create a session and send a message:

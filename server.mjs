@@ -112,7 +112,7 @@ function getConfiguredWorkspaceRoot() {
 
 function normalizeRuntimeProvider(value) {
   const provider = String(value || '').trim().toLowerCase();
-  return ['openai', 'vllm', 'ollama', 'openai_compatible'].includes(provider) ? provider : 'openai';
+  return ['openai', 'vllm', 'ollama', 'openai_compatible', 'osirus'].includes(provider) ? provider : 'openai';
 }
 
 function normalizeAuthMode(value, runtimeProvider = 'openai') {
@@ -354,7 +354,9 @@ function buildCodexConfigToml(config = activeRuntimeConfig) {
     return `${lines.join('\n')}\n`;
   }
 
-  const providerId = config.runtime_provider === 'ollama' ? 'cms_ollama' : 'cms_local';
+  const providerId = config.runtime_provider === 'ollama'
+    ? 'cms_ollama'
+    : (config.runtime_provider === 'osirus' ? 'cms_osirus' : 'cms_local');
   const defaultBaseUrl = config.runtime_provider === 'ollama' ? 'http://127.0.0.1:11434/v1' : '';
   lines.push(`model_provider = ${toTomlString(providerId)}`);
   if (model) {
@@ -362,7 +364,13 @@ function buildCodexConfigToml(config = activeRuntimeConfig) {
   }
   lines.push('');
   lines.push(`[model_providers.${providerId}]`);
-  lines.push(`name = ${toTomlString(config.runtime_provider === 'ollama' ? 'Ollama' : (config.runtime_provider === 'vllm' ? 'vLLM' : 'OpenAI Compatible'))}`);
+  lines.push(`name = ${toTomlString(
+    config.runtime_provider === 'ollama'
+      ? 'Ollama'
+      : (config.runtime_provider === 'vllm'
+        ? 'vLLM'
+        : (config.runtime_provider === 'osirus' ? 'Osirus.AI' : 'OpenAI Compatible'))
+  )}`);
   lines.push(`base_url = ${toTomlString(baseUrl || defaultBaseUrl)}`);
   lines.push('wire_api = "responses"');
   if (config.auth_mode === 'api_key' && runtimeHasDirectApiKey(config)) {
