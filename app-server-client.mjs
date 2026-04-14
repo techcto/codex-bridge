@@ -2,11 +2,12 @@ import { EventEmitter } from 'node:events';
 import { spawn } from 'node:child_process';
 
 export class AppServerClient extends EventEmitter {
-  constructor({ cwd, env = {}, clientInfo }) {
+  constructor({ cwd, env = {}, clientInfo, codexCommand = 'codex' }) {
     super();
     this.cwd = cwd;
     this.env = env;
     this.clientInfo = clientInfo;
+    this.codexCommand = codexCommand;
     this.child = null;
     this.buffer = '';
     this.nextId = 1;
@@ -32,7 +33,10 @@ export class AppServerClient extends EventEmitter {
 
   async request(method, params = null) {
     await this.start();
+    return this.#sendRequest(method, params);
+  }
 
+  async #sendRequest(method, params = null) {
     const id = this.nextId++;
     const payload = { id, method };
     if (params !== null && params !== undefined) {
@@ -61,7 +65,7 @@ export class AppServerClient extends EventEmitter {
   }
 
   async #startInternal() {
-    this.child = spawn('codex', ['app-server'], {
+    this.child = spawn(this.codexCommand, ['app-server'], {
       cwd: this.cwd,
       env: this.env,
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -87,7 +91,7 @@ export class AppServerClient extends EventEmitter {
       this.#reset(new Error(`Codex App Server exited with ${details}`));
     });
 
-    await this.request('initialize', {
+    await this.#sendRequest('initialize', {
       clientInfo: this.clientInfo,
       capabilities: {
         experimentalApi: true,

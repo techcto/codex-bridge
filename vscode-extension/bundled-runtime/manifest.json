@@ -1,0 +1,10 @@
+{
+  "generated_at": "2026-04-14T13:05:44.533Z",
+  "runtimes": [
+    {
+      "platform": "win32-x64",
+      "executable": "bundled-runtime/win32-x64/codex.exe",
+      "size": 248658944
+    }
+  ]
+}

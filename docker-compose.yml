@@ -5,9 +5,9 @@ services:
     image: node:22-bookworm-slim
     working_dir: /opt/codex-bridge
     ports:
-      - "4318:4318"
+      - "4399:4399"
     environment:
-      CODEX_BRIDGE_PORT: "4318"
+      CODEX_BRIDGE_PORT: "4399"
       CODEX_RUNTIME_KIND: "app_server_adapter"
       CODEX_WORKSPACE_ROOT: "/workspace"
     volumes:

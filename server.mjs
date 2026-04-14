@@ -1,14 +1,17 @@
 import { createServer } from 'node:http';
-import { URL } from 'node:url';
+import { URL, fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 import { access, mkdir, rm, writeFile } from 'node:fs/promises';
 import { constants as fsConstants } from 'node:fs';
 import { randomUUID } from 'node:crypto';
-import { extname, join } from 'node:path';
+import { dirname, extname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { AppServerClient } from './app-server-client.mjs';
-const port = Number.parseInt(process.env.CODEX_BRIDGE_PORT || '4318', 10);
-const defaultWorkspaceRoot = process.env.CODEX_WORKSPACE_ROOT || '/workspace/solodev';
+const bridgeScriptDirectory = dirname(fileURLToPath(import.meta.url));
+const port = Number.parseInt(process.env.CODEX_BRIDGE_PORT || '4399', 10);
+const host = process.env.CODEX_BRIDGE_HOST || '127.0.0.1';
+const codexBin = String(process.env.CODEX_BIN || 'codex').trim() || 'codex';
+const defaultWorkspaceRoot = String(process.env.CODEX_WORKSPACE_ROOT || process.cwd() || bridgeScriptDirectory).trim() || bridgeScriptDirectory;
 const codexHome = process.env.CODEX_HOME || '/home/codex/.codex';
 const runtimeKind = process.env.CODEX_RUNTIME_KIND || 'app_server_adapter';
 const defaultLoginHint = process.env.CODEX_LOGIN_HINT || 'Connect Codex here once so the CMS can open chat without setup screens.';
@@ -20,12 +23,17 @@ const threadSessionIndex = new Map();
 const bridgeTempRoot = join(tmpdir(), 'codex-bridge');
 const codexConfigPath = join(codexHome, 'config.toml');
 const chatTurnTimeoutMs = Number.parseInt(process.env.CODEX_CHAT_TURN_TIMEOUT_MS || '180000', 10);
+const maxConcurrentTurns = Number.parseInt(process.env.CODEX_MAX_CONCURRENT_TURNS || '4', 10);
+const maxQueuedTurns = Number.parseInt(process.env.CODEX_MAX_QUEUED_TURNS || '40', 10);
 const loginStatusCacheTtlMs = Number.parseInt(process.env.CODEX_LOGIN_STATUS_CACHE_MS || '3000', 10);
 let cachedLoginStatusSummary = null;
 let loginStatusPromise = null;
 let appServerClient = null;
+let recentAppServerStderr = '';
 let activeRuntimeConfig = normalizeRuntimeConfig();
 let appliedRuntimeConfigHash = '';
+let activeTurnCount = 0;
+const pendingTurnQueue = [];
 
 function buildCorsHeaders(request) {
   const origin = request.headers.origin || '*';
@@ -112,16 +120,35 @@ function getConfiguredWorkspaceRoot() {
 
 function normalizeRuntimeProvider(value) {
   const provider = String(value || '').trim().toLowerCase();
-  return ['openai', 'vllm', 'ollama', 'openai_compatible', 'osirus'].includes(provider) ? provider : 'openai';
+  return ['openai', 'vllm', 'ollama', 'openai_compatible', 'osirus', 'osirus_agent'].includes(provider) ? provider : 'openai';
 }
 
 function normalizeAuthMode(value, runtimeProvider = 'openai') {
   const authMode = String(value || '').trim().toLowerCase();
-  if (['chatgpt', 'api_key', 'none'].includes(authMode)) {
-    return authMode;
+  if (runtimeProvider === 'openai') {
+    if (['chatgpt', 'api_key'].includes(authMode)) {
+      return authMode;
+    }
+    return 'chatgpt';
   }
 
-  return runtimeProvider === 'openai' ? 'chatgpt' : 'none';
+  if (runtimeProvider === 'osirus') {
+    return authMode === 'api_key' ? 'api_key' : 'none';
+  }
+
+  if (runtimeProvider === 'osirus_agent') {
+    return 'api_key';
+  }
+
+  if (runtimeProvider === 'ollama') {
+    return 'none';
+  }
+
+  if (runtimeProvider === 'vllm' || runtimeProvider === 'openai_compatible') {
+    return authMode === 'none' ? 'none' : 'api_key';
+  }
+
+  return 'none';
 }
 
 function normalizeRuntimeConfig(payload = {}) {
@@ -262,6 +289,7 @@ function buildProxyRequestHeaders(request, config = activeRuntimeConfig) {
 
 async function proxyOpenAiCompatibleRequest(request, response, requestUrl) {
   const targetUrl = buildUpstreamApiUrl(requestUrl);
+  logBridge(`proxy ${summarizeRequest(request)} -> ${targetUrl || '(missing upstream url)'}`);
   if (!targetUrl) {
     return sendJson(request, response, {
       ok: false,
@@ -308,6 +336,7 @@ async function proxyOpenAiCompatibleRequest(request, response, requestUrl) {
 
     if (!upstreamResponse.body || request.method === 'HEAD') {
       response.end();
+      logBridge(`proxy complete ${summarizeRequest(request)} <- ${upstreamResponse.status} from ${targetUrl}`);
       return;
     }
 
@@ -316,7 +345,9 @@ async function proxyOpenAiCompatibleRequest(request, response, requestUrl) {
     }
 
     response.end();
+    logBridge(`proxy complete ${summarizeRequest(request)} <- ${upstreamResponse.status} from ${targetUrl}`);
   } catch (error) {
+    logBridge(`proxy error ${summarizeRequest(request)} -> ${targetUrl}: ${error instanceof Error ? error.message : String(error)}`);
     return sendJson(request, response, {
       ok: false,
       error: error instanceof Error ? error.message : 'Unable to proxy the OpenAI-compatible API request.',
@@ -334,7 +365,8 @@ function buildCodexConfigToml(config = activeRuntimeConfig) {
   const baseUrl = String(config.provider_api_base_url || '').trim();
 
   if (config.runtime_provider === 'openai') {
-    lines.push('model_provider = "openai"');
+    const providerId = config.auth_mode === 'api_key' ? 'cms_openai' : 'openai';
+    lines.push(`model_provider = ${toTomlString(providerId)}`);
     if (model) {
       lines.push(`model = ${toTomlString(model)}`);
     }
@@ -342,7 +374,7 @@ function buildCodexConfigToml(config = activeRuntimeConfig) {
     if (config.auth_mode === 'api_key') {
       lines.push('preferred_auth_method = "apikey"');
       lines.push('');
-      lines.push('[model_providers.openai]');
+      lines.push(`[model_providers.${providerId}]`);
       lines.push('name = "OpenAI"');
       lines.push('env_key = "OPENAI_API_KEY"');
       lines.push('wire_api = "responses"');
@@ -356,7 +388,9 @@ function buildCodexConfigToml(config = activeRuntimeConfig) {
 
   const providerId = config.runtime_provider === 'ollama'
     ? 'cms_ollama'
-    : (config.runtime_provider === 'osirus' ? 'cms_osirus' : 'cms_local');
+    : (config.runtime_provider === 'osirus_agent'
+      ? 'cms_osirus_agent'
+      : (config.runtime_provider === 'osirus' ? 'cms_osirus' : 'cms_local'));
   const defaultBaseUrl = config.runtime_provider === 'ollama' ? 'http://127.0.0.1:11434/v1' : '';
   lines.push(`model_provider = ${toTomlString(providerId)}`);
   if (model) {
@@ -369,7 +403,9 @@ function buildCodexConfigToml(config = activeRuntimeConfig) {
       ? 'Ollama'
       : (config.runtime_provider === 'vllm'
         ? 'vLLM'
-        : (config.runtime_provider === 'osirus' ? 'Osirus.AI' : 'OpenAI Compatible'))
+        : (config.runtime_provider === 'osirus_agent'
+          ? 'Osirus Agent'
+          : (config.runtime_provider === 'osirus' ? 'Osirus.AI' : 'OpenAI Compatible')))
   )}`);
   lines.push(`base_url = ${toTomlString(baseUrl || defaultBaseUrl)}`);
   lines.push('wire_api = "responses"');
@@ -412,6 +448,9 @@ async function applyRuntimeConfig(payload = {}, options = {}) {
   const nextConfig = normalizeRuntimeConfig(payload);
   const changed = runtimeConfigHash(nextConfig) !== runtimeConfigHash(activeRuntimeConfig);
   activeRuntimeConfig = nextConfig;
+  logBridge(
+    `runtime config provider=${nextConfig.runtime_provider} auth=${nextConfig.auth_mode} base_url=${nextConfig.provider_api_base_url || '(default)'} model=${nextConfig.default_model || '(auto)'} workspace_root=${nextConfig.workspace_root || defaultWorkspaceRoot}`
+  );
 
   const nextHash = runtimeConfigHash(nextConfig);
   if (nextHash !== appliedRuntimeConfigHash) {
@@ -446,6 +485,7 @@ function getRuntimeInfo() {
     codex_home: codexHome,
     workspace_root: getConfiguredWorkspaceRoot(),
     runtime_config: summarizeRuntimeConfig(),
+    bridge_load: getBridgeLoad(),
     capabilities: {
       chat_sessions: true,
       session_streaming: true,
@@ -454,7 +494,17 @@ function getRuntimeInfo() {
       openai_compatible_routes: true,
       app_server_transport: runtimeKind === 'app_server_adapter',
       long_lived_worker: runtimeKind === 'app_server_adapter',
+      concurrency_controls: true,
     },
+  };
+}
+
+function getBridgeLoad() {
+  return {
+    active_turns: activeTurnCount,
+    pending_turns: pendingTurnQueue.length,
+    max_concurrent_turns: maxConcurrentTurns,
+    max_queued_turns: maxQueuedTurns,
   };
 }
 
@@ -685,6 +735,63 @@ function publishSession(session, eventName = 'session.updated') {
       writeSse(subscriber, eventName, payload);
     } catch (error) {}
   });
+}
+
+function dispatchQueuedTurns() {
+  while (activeTurnCount < maxConcurrentTurns && pendingTurnQueue.length > 0) {
+    const next = pendingTurnQueue.shift();
+    if (!next || !next.session) {
+      continue;
+    }
+
+    void startScheduledTurn(next.session, next.message);
+  }
+}
+
+async function startScheduledTurn(session, message) {
+  activeTurnCount += 1;
+  session.status = 'running';
+  session.updatedAt = Date.now();
+  publishSession(session, 'session.running');
+
+  try {
+    await runChatTurn(session, message);
+  } catch (error) {
+    session.lastError = error instanceof Error ? error.message : 'Unable to run chat turn.';
+  } finally {
+    activeTurnCount = Math.max(0, activeTurnCount - 1);
+    dispatchQueuedTurns();
+  }
+}
+
+function scheduleChatTurn(session, message) {
+  if (session.running || session.status === 'queued') {
+    throw new Error('Codex is already working on this conversation.');
+  }
+
+  if (activeTurnCount >= maxConcurrentTurns) {
+    if (pendingTurnQueue.length >= maxQueuedTurns) {
+      const error = new Error(`Codex Bridge is busy. Queue is full (${maxQueuedTurns} pending turns).`);
+      error.statusCode = 503;
+      throw error;
+    }
+
+    session.status = 'queued';
+    session.updatedAt = Date.now();
+    session.lastError = null;
+    pendingTurnQueue.push({ session, message });
+    publishSession(session, 'session.queued');
+    return {
+      queued: true,
+      load: getBridgeLoad(),
+    };
+  }
+
+  void startScheduledTurn(session, message);
+  return {
+    queued: false,
+    load: getBridgeLoad(),
+  };
 }
 
 async function readJsonBody(request) {
@@ -1079,6 +1186,27 @@ function wait(ms) {
   });
 }
 
+function recordAppServerStderr(chunk) {
+  const text = String(chunk || '');
+  if (!text) {
+    return;
+  }
+
+  recentAppServerStderr = `${recentAppServerStderr}${text}`.slice(-4000);
+  const trimmed = text.trim();
+  if (trimmed) {
+    console.error(`[app-server stderr] ${trimmed}`);
+  }
+}
+
+function logBridge(message) {
+  console.log(`[bridge] ${message}`);
+}
+
+function summarizeRequest(request) {
+  return `${request.method || 'GET'} ${request.url || '/'}`;
+}
+
 function invalidateLoginStatusCache() {
   cachedLoginStatusSummary = null;
   loginStatusPromise = null;
@@ -1093,7 +1221,12 @@ async function getCodexWorkingDirectory() {
     await access(getConfiguredWorkspaceRoot(), fsConstants.R_OK | fsConstants.X_OK);
     resolvedWorkingDirectory = getConfiguredWorkspaceRoot();
   } catch (error) {
-    resolvedWorkingDirectory = '/opt/codex-bridge';
+    try {
+      await access(process.cwd(), fsConstants.R_OK | fsConstants.X_OK);
+      resolvedWorkingDirectory = process.cwd();
+    } catch (fallbackError) {
+      resolvedWorkingDirectory = bridgeScriptDirectory;
+    }
   }
 
   return resolvedWorkingDirectory;
@@ -1103,7 +1236,7 @@ async function spawnCodex(args) {
   await ensureRuntimeConfigApplied();
   const cwd = await getCodexWorkingDirectory();
 
-  return spawn('codex', args, {
+  return spawn(codexBin, args, {
     env: buildCodexEnv(),
     cwd,
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -1126,6 +1259,7 @@ async function getAppServerClient() {
   appServerClient = new AppServerClient({
     cwd,
     env: buildCodexEnv(),
+    codexCommand: codexBin,
     clientInfo: {
       name: 'solodev-cms-codex-bridge',
       title: 'Solodev CMS Codex Bridge',
@@ -1137,13 +1271,21 @@ async function getAppServerClient() {
     handleAppServerNotification(method, params);
   });
 
+  appServerClient.on('stderr', (chunk) => {
+    recordAppServerStderr(chunk);
+  });
+
   appServerClient.on('exit', (error) => {
+    const stderrHint = String(recentAppServerStderr || '').trim();
+    const combinedError = stderrHint && error instanceof Error && !error.message.includes(stderrHint)
+      ? new Error(`${error.message}\n${stderrHint}`)
+      : error;
     chatSessions.forEach((session) => {
       if (!session.running) {
         return;
       }
 
-      completeAppServerSession(session, error || new Error('Codex App Server stopped.'));
+      completeAppServerSession(session, combinedError || new Error('Codex App Server stopped.'));
     });
   });
 
@@ -1197,11 +1339,14 @@ async function completeAppServerSession(session, error = null) {
 
   if (error) {
     session.status = 'error';
-    session.lastError = error.message;
+    const stderrHint = String(recentAppServerStderr || '').trim();
+    session.lastError = stderrHint && !String(error.message || '').includes(stderrHint)
+      ? `${error.message}\n${stderrHint}`
+      : error.message;
     session.assistantItems = new Map();
     publishSession(session, 'session.error');
     if (typeof session.pendingReject === 'function') {
-      session.pendingReject(error);
+      session.pendingReject(new Error(session.lastError));
     }
     session.pendingResolve = null;
     session.pendingReject = null;
@@ -1643,6 +1788,25 @@ async function getLoginStatusWithFinalize() {
   return loginStatus;
 }
 
+async function getLoginStatusForHealth(timeoutMs = 1200) {
+  try {
+    return await Promise.race([
+      getLoginStatusWithFinalize(),
+      wait(timeoutMs).then(() => ({
+        logged_in: false,
+        auth_mode: getRuntimeAuthState(),
+        message: 'Login status check timed out.',
+      })),
+    ]);
+  } catch (error) {
+    return {
+      logged_in: false,
+      auth_mode: getRuntimeAuthState(),
+      message: error instanceof Error ? error.message : 'Unable to determine login status.',
+    };
+  }
+}
+
 function renderPage({ contextName, contextType, contextId, loginHint, authState }) {
   const subtitle = contextName
     ? `${contextType} #${contextId}: ${contextName}`
@@ -2063,6 +2227,7 @@ function renderCmsThinkingPage() {
 createServer(async (request, response) => {
   const url = new URL(request.url || '/', `http://${request.headers.host || 'localhost'}`);
   const authState = getRuntimeAuthState();
+  logBridge(`request ${request.method || 'GET'} ${url.pathname}${url.search}`);
 
   if (request.method === 'OPTIONS') {
     response.writeHead(204, buildCorsHeaders(request));
@@ -2075,7 +2240,7 @@ createServer(async (request, response) => {
   }
 
   if (url.pathname === '/health') {
-    const loginStatus = await getLoginStatusWithFinalize();
+    const loginStatus = await getLoginStatusForHealth();
     return sendJson(request, response, {
       ok: true,
       service: 'codex-bridge',
@@ -2196,18 +2361,21 @@ createServer(async (request, response) => {
       }
 
       session.pendingAttachments = attachments;
-
-      runChatTurn(session, message).catch(() => {});
+      const scheduled = scheduleChatTurn(session, message);
 
       return sendJson(request, response, {
         ok: true,
+        queued: scheduled.queued,
+        bridge_load: scheduled.load,
         session: serializeSession(session),
       }, 202);
     } catch (error) {
+      const statusCode = Number.isInteger(error?.statusCode) ? error.statusCode : 400;
       return sendJson(request, response, {
         ok: false,
         error: error instanceof Error ? error.message : 'Unable to send message',
-      }, 400);
+        bridge_load: getBridgeLoad(),
+      }, statusCode);
     }
   }
 
@@ -2406,6 +2574,6 @@ createServer(async (request, response) => {
     loginHint,
     authState,
   }));
-}).listen(port, '0.0.0.0', () => {
-  console.log(`Codex bridge listening on ${port}`);
+}).listen(port, host, () => {
+  console.log(`Codex bridge listening on ${host}:${port}`);
 });

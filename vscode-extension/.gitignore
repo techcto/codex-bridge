@@ -1,0 +1,8 @@
+dist/
+node_modules/
+*.vsix
+.vscode/
+.claude/
+.codex
+bundled-runtime/*/codex
+bundled-runtime/*/codex.exe

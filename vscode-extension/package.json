@@ -1,0 +1,187 @@
+{
+  "name": "codex-bridge-vscode",
+  "displayName": "Codex Bridge",
+  "description": "VS Code extension for connecting to the Codex Bridge runtime.",
+  "version": "0.0.1",
+  "publisher": "solodev",
+  "license": "Apache-2.0",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Other",
+    "Chat"
+  ],
+  "activationEvents": [
+    "onStartupFinished",
+    "onView:codexBridge.sidebar",
+    "onCommand:codexBridge.openChat",
+    "onCommand:codexBridge.checkHealth",
+    "onCommand:codexBridge.configure",
+    "onCommand:codexBridge.startLocalBridge",
+    "onCommand:codexBridge.stopLocalBridge",
+    "onCommand:codexBridge.restartLocalBridge",
+    "onCommand:codexBridge.showBridgeLogs"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "codexBridge.openChat",
+        "title": "Codex Bridge: Open Chat",
+        "icon": {
+          "light": "media/osirus-icon.svg",
+          "dark": "media/osirus-icon.svg"
+        }
+      },
+      {
+        "command": "codexBridge.checkHealth",
+        "title": "Codex Bridge: Check Health"
+      },
+      {
+        "command": "codexBridge.configure",
+        "title": "Codex Bridge: Configure Connection"
+      },
+      {
+        "command": "codexBridge.startLocalBridge",
+        "title": "Codex Bridge: Start Local Bridge"
+      },
+      {
+        "command": "codexBridge.stopLocalBridge",
+        "title": "Codex Bridge: Stop Local Bridge"
+      },
+      {
+        "command": "codexBridge.restartLocalBridge",
+        "title": "Codex Bridge: Restart Local Bridge"
+      },
+      {
+        "command": "codexBridge.showBridgeLogs",
+        "title": "Codex Bridge: Show Bridge Logs"
+      }
+    ],
+    "menus": {
+      "editor/title": [
+        {
+          "command": "codexBridge.openChat",
+          "when": "resourceScheme == file",
+          "group": "navigation@100"
+        }
+      ],
+      "view/title": [
+        {
+          "command": "codexBridge.openChat",
+          "when": "view == codexBridge.sidebar",
+          "group": "navigation@100"
+        }
+      ]
+    },
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "codexBridge",
+          "title": "Codex Bridge",
+          "icon": "media/osirus-icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "codexBridge": [
+        {
+          "type": "webview",
+          "id": "codexBridge.sidebar",
+          "name": "Codex Bridge"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Codex Bridge",
+      "properties": {
+        "codexBridge.baseUrl": {
+          "type": "string",
+          "default": "http://127.0.0.1:4400",
+          "description": "Base URL for the Codex Bridge service."
+        },
+        "codexBridge.runtimeProvider": {
+          "type": "string",
+          "default": "openai",
+          "enum": [
+            "openai",
+            "ollama",
+            "vllm",
+            "osirus",
+            "osirus_agent",
+            "openai_compatible"
+          ],
+          "description": "Runtime provider sent to the bridge runtime config endpoint."
+        },
+        "codexBridge.authMode": {
+          "type": "string",
+          "default": "chatgpt",
+          "enum": [
+            "chatgpt",
+            "api_key",
+            "none"
+          ],
+          "description": "Authentication mode sent to the bridge runtime config endpoint."
+        },
+        "codexBridge.providerApiBaseUrl": {
+          "type": "string",
+          "default": "",
+          "description": "Optional upstream OpenAI-compatible provider base URL."
+        },
+        "codexBridge.providerApiKey": {
+          "type": "string",
+          "default": "",
+          "description": "Legacy setting. The extension now stores provider API keys in VS Code secret storage instead of settings.json."
+        },
+        "codexBridge.defaultModel": {
+          "type": "string",
+          "default": "",
+          "description": "Optional default model override."
+        },
+        "codexBridge.localCodexPath": {
+          "type": "string",
+          "default": "",
+          "description": "Optional absolute path to a local Codex executable. If blank, the extension prefers a bundled runtime and then falls back to codex on PATH."
+        },
+        "codexBridge.workspaceRoot": {
+          "type": "string",
+          "default": "",
+          "description": "Optional workspace root to send to the bridge."
+        },
+        "codexBridge.autoStartLocalBridge": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically start a local codex-bridge sidecar when opening chat or checking health for a localhost bridge URL."
+        },
+        "codexBridge.showStatusBarButton": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show a status bar button for quickly opening Codex Bridge chat."
+        },
+        "codexBridge.osirusSignupUrl": {
+          "type": "string",
+          "default": "https://osirus.ai/signup",
+          "description": "Signup URL opened from the Osirus sidebar landing page."
+        },
+        "codexBridge.osirusApiKeysUrl": {
+          "type": "string",
+          "default": "https://osirus.ai/api-keys",
+          "description": "API keys URL opened from the Osirus login flow."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "tsc -p ./ && npm run build:bundle-manifest",
+    "build:bundle-manifest": "node ./scripts/write-runtime-manifest.mjs",
+    "package:vsix": "npx @vscode/vsce package",
+    "prepare:bundled-runtime": "node ./scripts/prepare-bundled-runtime.mjs",
+    "watch": "tsc -w -p ./"
+  },
+  "devDependencies": {
+    "@types/node": "^20.12.12",
+    "@types/vscode": "^1.90.0",
+    "typescript": "^5.6.3"
+  }
+}

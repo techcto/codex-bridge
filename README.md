@@ -4,14 +4,15 @@
 [![Docker Compose](https://img.shields.io/badge/docker-compose-available-brightgreen.svg)](docker-compose.yml)
 [![Runtime](https://img.shields.io/badge/runtime-app__server__adapter-6c5ce7.svg)](#environment)
 
-This repo provides a CMS-friendly Codex runtime bridge. It exposes a small REST + SSE surface that content platforms can call for chat sessions, auth, runtime info, and streaming events.
+This repo provides a CMS-friendly Codex runtime bridge. It exposes a small REST + SSE surface that content platforms can call for chat sessions, auth, runtime info, and streaming events. OpenAI is the primary default path, Osirus is the next featured provider, and other OpenAI-compatible backends remain supported.
 
-Supported runtime providers:
+Supported runtime providers, in recommended order:
 
 - `openai`
+- `osirus`
+- `osirus_agent`
 - `ollama`
 - `vllm`
-- `osirus`
 - `openai_compatible`
 
 ## Why This Exists
@@ -26,15 +27,72 @@ The Codex Bridge enables open, interoperable AI editing for CMS platforms withou
 
 - `server.mjs`: main bridge service (Node.js)
 - `app-server-client.mjs`: client utilities for the app-server adapter runtime
+- `vscode-extension/`: VS Code extension, bundled-runtime helpers, and packaging flow
+- `cmd.sh`: bridge-local helper commands for runtime builds, extension packaging, and Docker workflows
 
 ## Running Locally
+
+Fastest direct bridge run:
 
 ```bash
 npm install -g @openai/codex
 node server.mjs
 ```
 
-The bridge listens on port `4318` by default. You can override via `CODEX_BRIDGE_PORT`.
+The bridge listens on port `4399` by default. You can override via `CODEX_BRIDGE_PORT`.
+
+## Bridge-Local Helper Commands
+
+From the `codex-bridge` repo root:
+
+```bash
+./cmd.sh codexruntimebuildwin
+./cmd.sh codexruntimebuildlinux
+./cmd.sh codexbridgevscodebuild
+./cmd.sh codexbridgevscodepackage
+./cmd.sh codexbridgeup
+./cmd.sh codexbridgelogs
+```
+
+Notes:
+
+- staged local runtimes live under `tools/codex-runtime/`
+- by default `./cmd.sh codexruntimebuild*` looks for Codex source at `../codex/codex-rs`
+- if your Codex source lives elsewhere, set `CODEX_SOURCE_DIR=/absolute/path/to/codex/codex-rs`
+
+Example:
+
+```bash
+CODEX_SOURCE_DIR=/absolute/path/to/codex/codex-rs ./cmd.sh codexruntimebuildwin
+```
+
+## VS Code Extension
+
+Build and package from the bridge repo root:
+
+```bash
+./cmd.sh codexbridgevscodebuild
+./cmd.sh codexbridgevscodepackage
+```
+
+Or directly from the extension folder:
+
+```bash
+cd vscode-extension
+npm install
+npm run build
+```
+
+To test in VS Code:
+
+1. Open `vscode-extension/` in VS Code.
+2. Press `F5` to launch an Extension Development Host.
+3. Use `Codex Bridge: Configure Connection`.
+4. Start the local bridge or let the extension auto-start it.
+
+The extension README has the provider-specific details:
+
+- [vscode-extension/README.md](./vscode-extension/README.md)
 
 ## CMS Integration
 
@@ -44,25 +102,52 @@ A CMS image or VM can copy this repository into `/opt/codex-bridge` and run:
 node /opt/codex-bridge/server.mjs
 ```
 
-The CMS talks to the bridge through the Codex service URL (see provider settings in your platform).
+The CMS talks to the bridge through the Codex service URL (see provider settings in your platform). For CMS environments, the preferred deployment model is a host-managed `codex-bridge` service with separate logs, health checks, and restart policy from the CMS itself.
 
 ## Environment
 
 Common variables:
 
-- `CODEX_BRIDGE_PORT` (default `4318`)
+- `CODEX_BRIDGE_PORT` (default `4399`)
 - `CODEX_RUNTIME_KIND` (default `app_server_adapter`)
 - `CODEX_WORKSPACE_ROOT` (CMS workspace root)
+- `CODEX_MAX_CONCURRENT_TURNS` (default `4`)
+- `CODEX_MAX_QUEUED_TURNS` (default `40`)
 
-## Docker Compose (Local Testing)
+## Docker Compose (Optional Local Testing)
 
-Run the bridge locally with Docker Compose:
+Run the bridge locally with Docker Compose if you want a containerized test path:
 
 ```bash
 docker compose up --build
 ```
 
-This starts the bridge on port `4318` and mounts the current repo into the container. You can override environment variables in `docker-compose.yml`.
+This starts the bridge on port `4399` and mounts the current repo into the container. You can override environment variables in `docker-compose.yml`.
+
+Docker is optional. The primary local dev path is running `server.mjs` directly, and the preferred CMS runtime path is a host-managed bridge service.
+
+## Public Repo Hygiene
+
+This repository is intended to be safe to publish publicly.
+
+Local-only artifacts are gitignored, including:
+
+- `tools/` staged runtimes
+- `vscode-extension/bundled-runtime/*/codex*`
+- `vscode-extension/.vscode/`
+- `vscode-extension/.claude/`
+- `vscode-extension/.codex`
+- `*.vsix`
+- local `.env*` files
+
+Do not commit:
+
+- API keys or bearer tokens
+- local Codex runtime binaries
+- VS Code workspace state
+- packaged extension output
+
+The examples in this README use placeholders like `YOUR_API_KEY`; replace them locally, not in committed files.
 
 ## API Surface (Core)
 
@@ -92,13 +177,13 @@ This starts the bridge on port `4318` and mounts the current repo into the conta
 ## Quick Demo
 
 ```bash
-curl -s http://localhost:4318/runtime/info | jq .
+curl -s http://localhost:4399/runtime/info | jq .
 ```
 
 Point the bridge at an Osirus agent-scoped compatibility route:
 
 ```bash
-curl -s -X POST http://localhost:4318/runtime/config \
+curl -s -X POST http://localhost:4399/runtime/config \
   -H "Content-Type: application/json" \
   -d '{
     "runtime_provider": "osirus",
@@ -111,14 +196,16 @@ curl -s -X POST http://localhost:4318/runtime/config \
 Create a session and send a message:
 
 ```bash
-curl -s -X POST http://localhost:4318/chat/sessions \
+curl -s -X POST http://localhost:4399/chat/sessions \
   -H "Content-Type: application/json" \
   -d '{"context":{"context_name":"Homepage","context_type":"page","context_id":"123"}}' | jq .
 
-curl -s -X POST http://localhost:4318/chat/sessions/SESSION_ID/messages \
+curl -s -X POST http://localhost:4399/chat/sessions/SESSION_ID/messages \
   -H "Content-Type: application/json" \
   -d '{"message":"Create a hero section with a call-to-action."}' | jq .
 ```
+
+If bridge concurrency is saturated, `POST /chat/sessions/:id/messages` now returns either a bounded queued response or a busy error instead of allowing unbounded turn fan-out.
 
 ## Project Docs
 

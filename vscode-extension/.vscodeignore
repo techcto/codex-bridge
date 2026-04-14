@@ -1,0 +1,9 @@
+.claude/**
+.codex
+.gitignore
+.vscode/**
+node_modules/**
+src/**
+tsconfig.json
+scripts/**
+*.log

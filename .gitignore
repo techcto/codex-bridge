@@ -15,3 +15,10 @@ build/
 coverage/
 
 *.log
+/tools/
+/vscode-extension/.vscode/
+/vscode-extension/.claude/
+/vscode-extension/.codex
+/vscode-extension/*.vsix
+/vscode-extension/bundled-runtime/*/codex
+/vscode-extension/bundled-runtime/*/codex.exe
