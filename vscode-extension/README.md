@@ -69,6 +69,19 @@ From the `codex-bridge` repo root you can also use:
 ./cmd.sh codexbridgevscodepackage
 ```
 
+To build from source, clone the Codex repo next to `codex-bridge`:
+
+```bash
+cd ..
+git clone https://github.com/techcto/codex.git
+```
+
+By default, the helper commands look for Codex source at:
+
+```text
+../codex/codex-rs
+```
+
 From inside `vscode-extension`, that root is one directory up:
 
 ```bash
@@ -102,6 +115,22 @@ If your Codex source lives somewhere else, set `CODEX_SOURCE_DIR`:
 ```bash
 CODEX_SOURCE_DIR=/absolute/path/to/codex/codex-rs ./cmd.sh codexruntimebuildwin
 ```
+
+Typical source-build flow for local extension testing:
+
+```bash
+cd ..
+./cmd.sh codexruntimebuildwin
+./cmd.sh codexbridgevscodebuild
+```
+
+That stages the runtime to:
+
+```text
+tools/codex-runtime/win32-x64/codex.exe
+```
+
+and the extension build will bundle it automatically if present.
 
 You can also set `codexBridge.localCodexPath` to an absolute executable path for testing a custom local build before bundling it.
 
@@ -140,6 +169,10 @@ Recommended local split:
 - The chat panel is intentionally minimal so we can iterate on the protocol first.
 - Runtime config is sourced from VS Code settings under `codexBridge.*`.
 - Provider API keys are stored in VS Code secret storage and migrated out of legacy plain-text `settings.json` entries when possible.
+- For full local Codex runtime behavior, you need either:
+  - a globally installed `codex`, or
+  - a bundled runtime built from source, or
+  - `codexBridge.localCodexPath` pointing to a local executable
 - OpenAI is the default first-run path for Codex Bridge.
 - Osirus is the next featured path and supports both `osirus` and `osirus_agent`.
 - `osirus_agent` uses the agent-scoped `/v1` endpoint.

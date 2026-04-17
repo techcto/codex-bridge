@@ -41,6 +41,8 @@ node server.mjs
 
 The bridge listens on port `4399` by default. You can override via `CODEX_BRIDGE_PORT`.
 
+If you do not want to rely on a globally installed `codex`, clone the Codex source and build a local runtime instead. The bridge and VS Code extension can use that local runtime through the helper commands below.
+
 ## Bridge-Local Helper Commands
 
 From the `codex-bridge` repo root:
@@ -60,10 +62,61 @@ Notes:
 - by default `./cmd.sh codexruntimebuild*` looks for Codex source at `../codex/codex-rs`
 - if your Codex source lives elsewhere, set `CODEX_SOURCE_DIR=/absolute/path/to/codex/codex-rs`
 
+## Cloning Codex Source
+
+The easiest open-source layout is to check out the Codex source next to `codex-bridge`:
+
+```bash
+cd ..
+git clone https://github.com/techcto/codex.git
+```
+
+That gives you:
+
+```text
+.../codex-bridge
+.../codex
+```
+
+and `./cmd.sh codexruntimebuild*` will automatically look in:
+
+```text
+../codex/codex-rs
+```
+
 Example:
 
 ```bash
 CODEX_SOURCE_DIR=/absolute/path/to/codex/codex-rs ./cmd.sh codexruntimebuildwin
+```
+
+## Building Local Codex Runtimes
+
+Prerequisites:
+
+- Rust toolchain with `cargo`
+- for Windows builds, the MSVC Rust toolchain plus Visual Studio Build Tools with C++
+
+Build commands:
+
+```bash
+./cmd.sh codexruntimebuildwin
+./cmd.sh codexruntimebuildlinux
+./cmd.sh codexruntimebuildmac
+```
+
+Those commands stage the built runtime under:
+
+```text
+tools/codex-runtime/win32-x64/codex.exe
+tools/codex-runtime/linux-x64/codex
+tools/codex-runtime/darwin-arm64/codex
+```
+
+The VS Code extension build will automatically bundle the Windows runtime if it finds:
+
+```text
+tools/codex-runtime/win32-x64/codex.exe
 ```
 
 ## VS Code Extension
@@ -71,6 +124,7 @@ CODEX_SOURCE_DIR=/absolute/path/to/codex/codex-rs ./cmd.sh codexruntimebuildwin
 Build and package from the bridge repo root:
 
 ```bash
+./cmd.sh codexruntimebuildwin
 ./cmd.sh codexbridgevscodebuild
 ./cmd.sh codexbridgevscodepackage
 ```
