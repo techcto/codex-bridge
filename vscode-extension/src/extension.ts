@@ -34,6 +34,8 @@ type BridgeSessionRecord = {
   id?: string;
   status?: string;
   last_error?: string;
+  assistant_draft?: string;
+  assistantDraft?: string;
   messages?: Array<{
     role?: string;
     text?: string;
@@ -903,15 +905,27 @@ async function openChatPanel(context: vscode.ExtensionContext): Promise<void> {
         );
       }
 
-      chatPanel.webview.postMessage({ type: 'status', value: 'Waiting for Codex reply...' });
-      const completedSession = await waitForSessionCompletion(activeSessionId);
+      const panel = chatPanel;
+      if (!panel) {
+        throw new Error('Chat panel is no longer available.');
+      }
+
+      panel.webview.postMessage({ type: 'status', value: 'Waiting for Codex reply...' });
+      const completedSession = await streamBridgeSession(activeSessionId, {
+        onAssistantStart: () => {
+          panel.webview.postMessage({ type: 'assistantStart' });
+        },
+        onAssistantDelta: (delta) => {
+          panel.webview.postMessage({ type: 'assistantDelta', value: delta });
+        },
+      });
       const assistantText = extractAssistantTextFromSession(completedSession);
       await updateStoredThreadMessages(activeThread.id, mapBridgeSessionMessagesToLocal(completedSession.messages), {
         sessionId: activeSessionId,
       });
-      chatPanel.webview.postMessage({ type: 'assistantDone', value: assistantText });
+      panel.webview.postMessage({ type: 'assistantDone', value: assistantText });
       await pushChatPanelState(context);
-      chatPanel.webview.postMessage({ type: 'status', value: '' });
+      panel.webview.postMessage({ type: 'status', value: '' });
     } catch (error) {
       chatPanel.webview.postMessage({ type: 'error', value: getErrorMessage(error) });
     }
@@ -1093,6 +1107,34 @@ function getOsirusAccountApiBaseUrl(): string {
   return 'https://osirus.ai/api';
 }
 
+function normalizeOsirusCompatBaseUrl(value: string): string {
+  const raw = String(value || '').trim();
+  if (!raw) {
+    return '';
+  }
+
+  try {
+    const parsed = new URL(raw);
+    const normalizedPath = String(parsed.pathname || '').replace(/\/+$/, '');
+    if (!normalizedPath) {
+      parsed.pathname = '/api/v1';
+    } else if (/\/v\d+$/i.test(normalizedPath)) {
+      parsed.pathname = normalizedPath;
+    } else if (/\/api$/i.test(normalizedPath)) {
+      parsed.pathname = `${normalizedPath}/v1`;
+    } else {
+      parsed.pathname = normalizedPath;
+    }
+    return parsed.toString().replace(/\/+$/, '');
+  } catch (error) {
+    return raw.replace(/\/+$/, '');
+  }
+}
+
+function getOsirusCompatApiBaseUrl(): string {
+  return normalizeOsirusCompatBaseUrl(getOsirusAccountApiBaseUrl());
+}
+
 function getSuggestedDefaultModel(provider: RuntimeProvider, authMode: AuthMode): string {
   switch (provider) {
     case 'openai':
@@ -1260,7 +1302,7 @@ async function getRuntimeConfigPayload(options?: { modelOverride?: string }): Pr
 
   if (runtimeProvider === 'osirus') {
     providerApiKey = await getValidOsirusAccessToken();
-    providerApiBaseUrl = configuredBaseUrl || getOsirusAccountApiBaseUrl();
+    providerApiBaseUrl = normalizeOsirusCompatBaseUrl(configuredBaseUrl) || getOsirusCompatApiBaseUrl();
     authMode = providerApiKey.trim() ? 'api_key' : 'none';
   }
 
@@ -2376,7 +2418,13 @@ async function fetchOsirusChatSnapshot(chatId: string): Promise<OsirusChatSnapsh
 
   const payload = normalizeOsirusApiData(await requestOsirusJson<any>(
     'GET',
-    `/chat/${encodeURIComponent(resolvedChatId)}`
+    `/chat/${encodeURIComponent(resolvedChatId)}?context_scope=chat`,
+    undefined,
+    {
+      headers: {
+        'x-osirus-chat-scope': 'chat',
+      },
+    }
   ));
   const messages = Array.isArray(payload?.messages) ? payload.messages : [];
   const normalizedMessages = messages
@@ -2429,7 +2477,12 @@ async function sendOsirusChatMessage(prompt: string, modelSelectionId: string, e
   const payload = normalizeOsirusApiData(await requestOsirusJson<any>(
     'POST',
     `/chat/${encodeURIComponent(resolvedChatId)}/messages?context_scope=chat`,
-    formData
+    formData,
+    {
+      headers: {
+        'x-osirus-chat-scope': 'chat',
+      },
+    }
   ));
 
   const responseChatId = String(payload?.chat?.id || payload?.chatId || '').trim();
@@ -2833,6 +2886,130 @@ async function waitForSessionCompletion(sessionId: string, timeoutMs = 180000): 
   }
 
   throw new Error(`Timed out waiting for Codex reply for session ${sessionId}.`);
+}
+
+function getBridgeSessionAssistantDraft(session: BridgeSessionRecord | null | undefined): string {
+  if (!session || typeof session !== 'object') {
+    return '';
+  }
+
+  return String(session.assistant_draft || session.assistantDraft || '');
+}
+
+async function streamBridgeSession(
+  sessionId: string,
+  options?: {
+    onAssistantStart?: () => void;
+    onAssistantDelta?: (delta: string) => void;
+  }
+): Promise<BridgeSessionRecord> {
+  const url = `${getBaseUrl()}/chat/sessions/${encodeURIComponent(sessionId)}/stream`;
+  bridgeOutputChannel?.appendLine(`[bridge] -> GET ${url} [sse]`);
+
+  const controller = new AbortController();
+  const timeoutHandle = setTimeout(() => {
+    controller.abort();
+  }, 190000);
+  const startedAt = Date.now();
+
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      method: 'GET',
+      headers: {
+        'Accept': 'text/event-stream',
+      },
+      signal: controller.signal,
+    });
+  } catch (error) {
+    clearTimeout(timeoutHandle);
+    const message = error instanceof Error ? error.message : 'Unknown fetch failure.';
+    if (error instanceof Error && error.name === 'AbortError') {
+      throw new Error(`Timed out contacting Codex Bridge at ${url}.`);
+    }
+    throw new Error(`Unable to reach Codex Bridge at ${url}: ${message}`);
+  }
+
+  if (!response.ok || !response.body) {
+    clearTimeout(timeoutHandle);
+    const raw = await response.text();
+    throw new Error(raw || `Codex Bridge streaming failed with status ${response.status}.`);
+  }
+
+  let latestSession: BridgeSessionRecord | null = null;
+  let lastDraft = '';
+  let didStart = false;
+  let streamError = '';
+  let closedOnTerminalEvent = false;
+
+  try {
+    await consumeSseStream(response.body, (eventName, payload) => {
+      const data = (payload && typeof payload === 'object') ? payload as BridgeSessionResponse : null;
+      const session = data?.session;
+      if (session) {
+        latestSession = session;
+        const draft = getBridgeSessionAssistantDraft(session);
+        if (draft && !didStart) {
+          didStart = true;
+          options?.onAssistantStart?.();
+        }
+        if (draft.startsWith(lastDraft)) {
+          const delta = draft.slice(lastDraft.length);
+          if (delta) {
+            options?.onAssistantDelta?.(delta);
+          }
+        } else if (draft && draft !== lastDraft) {
+          if (!didStart) {
+            didStart = true;
+            options?.onAssistantStart?.();
+          }
+          options?.onAssistantDelta?.(draft);
+        }
+        lastDraft = draft;
+      }
+
+      if (eventName === 'session.error') {
+        streamError = session?.last_error || 'Codex session failed.';
+      }
+
+      const status = String(session?.status || '').toLowerCase();
+      if (eventName === 'session.completed' || eventName === 'session.error' || status === 'idle' || status === 'error') {
+        closedOnTerminalEvent = true;
+        controller.abort();
+      }
+    });
+  } catch (error) {
+    if (!(closedOnTerminalEvent && error instanceof Error && error.name === 'AbortError')) {
+      throw error;
+    }
+  } finally {
+    clearTimeout(timeoutHandle);
+  }
+
+  const elapsedMs = Date.now() - startedAt;
+  bridgeOutputChannel?.appendLine(`[bridge] <- stream ${url} (${elapsedMs}ms)`);
+
+  if (streamError) {
+    throw new Error(streamError);
+  }
+
+  if (!latestSession) {
+    bridgeOutputChannel?.appendLine(`[bridge] stream returned no session payload for ${sessionId}; falling back to polling`);
+    return waitForSessionCompletion(sessionId);
+  }
+
+  const resolvedSession: BridgeSessionRecord = latestSession;
+  const finalStatus = String(resolvedSession.status || '').toLowerCase();
+  if (finalStatus === 'error') {
+    throw new Error(resolvedSession.last_error || 'Codex session failed.');
+  }
+
+  if (finalStatus !== 'idle') {
+    bridgeOutputChannel?.appendLine(`[bridge] stream ended before idle for ${sessionId}; falling back to polling`);
+    return waitForSessionCompletion(sessionId);
+  }
+
+  return resolvedSession;
 }
 
 function extractAssistantTextFromSession(session: BridgeSessionRecord): string {

@@ -14,6 +14,7 @@ export class AppServerClient extends EventEmitter {
     this.pending = new Map();
     this.startPromise = null;
     this.initialized = false;
+    this.stopping = false;
   }
 
   async start() {
@@ -59,12 +60,38 @@ export class AppServerClient extends EventEmitter {
       return;
     }
 
-    try {
-      this.child.kill('SIGTERM');
-    } catch (error) {}
+    const child = this.child;
+    this.stopping = true;
+
+    await new Promise((resolve) => {
+      let settled = false;
+      const finish = () => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        this.off('exit', handleExit);
+        resolve();
+      };
+      const handleExit = () => {
+        finish();
+      };
+
+      this.once('exit', handleExit);
+
+      try {
+        child.kill('SIGTERM');
+      } catch (error) {
+        finish();
+        return;
+      }
+
+      setTimeout(finish, 5000);
+    });
   }
 
   async #startInternal() {
+    this.stopping = false;
     this.child = spawn(this.codexCommand, ['app-server'], {
       cwd: this.cwd,
       env: this.env,
@@ -155,13 +182,19 @@ export class AppServerClient extends EventEmitter {
   }
 
   #reset(error) {
+    const expectedStop = this.stopping;
+    this.stopping = false;
     this.initialized = false;
     this.startPromise = null;
     this.child = null;
 
-    this.pending.forEach(({ reject }) => reject(error));
+    if (error) {
+      this.pending.forEach(({ reject }) => reject(error));
+    } else {
+      this.pending.forEach(({ resolve }) => resolve(null));
+    }
     this.pending.clear();
 
-    this.emit('exit', error);
+    this.emit('exit', expectedStop ? null : error);
   }
 }

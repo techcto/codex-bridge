@@ -228,8 +228,11 @@ function getUpstreamApiBaseUrl(config = activeRuntimeConfig) {
 
   try {
     const parsed = new URL(baseUrl);
-    if (!parsed.pathname || parsed.pathname === '/') {
+    const normalizedPath = String(parsed.pathname || '').replace(/\/+$/, '');
+    if (!normalizedPath || normalizedPath === '') {
       parsed.pathname = '/v1';
+    } else if (!/\/v\d+$/i.test(normalizedPath)) {
+      parsed.pathname = `${normalizedPath}/v1`;
     }
     return parsed.toString().replace(/\/+$/, '');
   } catch (error) {
@@ -362,7 +365,7 @@ function toTomlString(value) {
 function buildCodexConfigToml(config = activeRuntimeConfig) {
   const lines = [];
   const model = String(config.default_model || '').trim();
-  const baseUrl = String(config.provider_api_base_url || '').trim();
+  const baseUrl = getUpstreamApiBaseUrl(config) || String(config.provider_api_base_url || '').trim();
 
   if (config.runtime_provider === 'openai') {
     const providerId = config.auth_mode === 'api_key' ? 'cms_openai' : 'openai';
@@ -674,6 +677,7 @@ function serializeSession(session) {
     context: session.context,
     messages: session.messages,
     events: session.events.slice(-40),
+    assistant_draft: getAssistantDraft(session),
     running: session.running,
     last_error: session.lastError,
     created_at: session.createdAt,
@@ -1276,6 +1280,10 @@ async function getAppServerClient() {
   });
 
   appServerClient.on('exit', (error) => {
+    if (!error) {
+      return;
+    }
+
     const stderrHint = String(recentAppServerStderr || '').trim();
     const combinedError = stderrHint && error instanceof Error && !error.message.includes(stderrHint)
       ? new Error(`${error.message}\n${stderrHint}`)
