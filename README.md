@@ -4,7 +4,7 @@
 [![Docker Compose](https://img.shields.io/badge/docker-compose-available-brightgreen.svg)](docker-compose.yml)
 [![Runtime](https://img.shields.io/badge/runtime-app__server__adapter-6c5ce7.svg)](#environment)
 
-This repo provides a CMS-friendly Codex runtime bridge. It exposes a small REST + SSE surface that content platforms can call for chat sessions, auth, runtime info, and streaming events. OpenAI is the primary default path, Osirus is the next featured provider, and other OpenAI-compatible backends remain supported.
+This repo provides an open-source Codex runtime bridge that host apps can embed. It exposes a small REST + SSE surface that applications can call for chat sessions, auth, runtime info, and streaming events. OpenAI is the primary default path, Osirus is the next featured provider, and other OpenAI-compatible backends remain supported.
 
 Supported runtime providers, in recommended order:
 
@@ -17,7 +17,7 @@ Supported runtime providers, in recommended order:
 
 ## Why This Exists
 
-Most CMS platforms need Codex to fit into their own auth, UI, and content workflows. This bridge keeps the integration light: the CMS owns permissions and content actions, while the runtime focuses on execution and streaming.
+Many applications need Codex to fit into their own auth, UI, and workflow model. This bridge keeps the integration light: the host app owns permissions and UX, while the runtime focuses on execution and streaming.
 
 ## Grant Pitch
 
@@ -25,10 +25,90 @@ The Codex Bridge enables open, interoperable AI editing for CMS platforms withou
 
 ## What’s Inside
 
-- `server.mjs`: main bridge service (Node.js)
+- `server.mjs`: bridge bootstrap and service wiring
 - `app-server-client.mjs`: client utilities for the app-server adapter runtime
+- `server-lib/auth-service.mjs`: device auth and login state
+- `server-lib/chat-session-service.mjs`: session queueing, streaming, turn execution, CMS generation helpers
+- `server-lib/request-handler.mjs`: HTTP route dispatch
 - `vscode-extension/`: VS Code extension, bundled-runtime helpers, and packaging flow
 - `cmd.sh`: bridge-local helper commands for runtime builds, extension packaging, and Docker workflows
+
+## How It Works
+
+```text
+Host App UI
+   |
+   v
+VS Code extension or other host integration
+   |
+   | HTTP + SSE
+   v
+codex-bridge
+   |
+   | spawn / app-server
+   v
+Native Codex CLI or Codex App Server
+   |
+   v
+Workspace reads, file edits, streamed events
+```
+
+The current VS Code path is:
+
+1. The extension resolves a Codex executable from `codexBridge.localCodexPath`, bundled runtime, or `codex` on `PATH`.
+2. The extension starts `server.mjs` as the local sidecar.
+3. The extension sends runtime config, workspace root, and chat context to the bridge.
+4. The bridge launches native Codex with `workspace-write` sandboxing.
+5. Codex reads and edits files in the workspace, and the bridge streams those events back to the extension.
+
+## Current Capability Status
+
+What is wired and working:
+
+- native Codex can be built from source with `cmd.sh`
+- the VS Code extension can bundle that runtime and launch it via `CODEX_BIN`
+- the bridge passes the active workspace root to Codex
+- chat sessions stream over SSE
+- Codex can edit files in the workspace through `workspace-write`
+- Codex can run workspace shell commands, including git status/history inspection, within the configured sandbox
+- image attachments from the VS Code chat panel are sent through the bridge to native Codex
+- provider/runtime config can be changed without changing the bridge code
+
+What is still partial or missing:
+
+- the chat webview is still custom/minimal, not a full React-style app shell
+- there is no diff/approval UI yet before workspace edits
+- non-image file attachments are not yet materialized into a richer native Codex file-ingest flow; the current bridge attachment path is image-first
+- provider model pickers can influence runtime config, but not every upstream model behaves as well as native Codex for code editing
+- the bridge is modular now, but `server-lib/chat-session-service.mjs` is still the biggest remaining class and could be split further
+
+## Agent Runtime Classes
+
+Codex Bridge now treats every backend as a `codex_agent` runtime, not a plain chat integration. The runtime can satisfy that contract in three different ways:
+
+- `native_tools`: the runtime exposes Codex-style workspace tools directly, so file edits, command execution, and git inspection can happen natively
+- `model_tools`: the runtime depends on the selected upstream model supporting tool use correctly; this path is model-dependent and should be treated as experimental until verified
+- `bridge_tools`: the host app intends to augment the model with a bridge-side tool adapter; this is the right shape for regular chat models, but the edit adapter still needs to be implemented
+
+The key rule is that model text is never the source of truth for workspace actions. A file edit, command run, or git inspection only counts as real when the bridge receives verified tool results from the runtime or from a future bridge-side adapter.
+
+Both `model_tools` and `bridge_tools` ultimately depend on the same local workspace tool protocol. The difference is how tool intent reaches that local executor:
+
+- `model_tools`: the upstream model/runtime emits structured tool-call intent directly, and the local bridge executes those actions against the real VS Code workspace
+- `bridge_tools`: the upstream model does not natively produce trustworthy tool calls, so the bridge must translate model intent into the same local workspace tool protocol itself
+
+That means the long-term architecture is still local execution in every case. The only thing that changes between `model_tools` and `bridge_tools` is where the structured tool intent comes from.
+
+The planned local-first tool protocol covers bridge-executed actions such as:
+
+- `list_files`
+- `read_file`
+- `search_text`
+- `run_command`
+- `git_status`
+- `git_log`
+- `git_diff`
+- `apply_patch`
 
 ## Running Locally
 
@@ -113,10 +193,10 @@ tools/codex-runtime/linux-x64/codex
 tools/codex-runtime/darwin-arm64/codex
 ```
 
-The VS Code extension build will automatically bundle the Windows runtime if it finds:
+The VS Code extension build will automatically bundle any staged runtimes it finds under:
 
 ```text
-tools/codex-runtime/win32-x64/codex.exe
+tools/codex-runtime/<platform>/codex[.exe]
 ```
 
 ## VS Code Extension
@@ -147,6 +227,21 @@ To test in VS Code:
 The extension README has the provider-specific details:
 
 - [vscode-extension/README.md](./vscode-extension/README.md)
+
+## Native Codex Runtime Path
+
+The native Codex path is:
+
+```text
+cmd.sh codexruntimebuild*
+  -> tools/codex-runtime/<platform>/codex[.exe]
+  -> bundled into vscode-extension/bundled-runtime/<platform>/
+  -> resolved by the extension
+  -> passed to the bridge as CODEX_BIN
+  -> launched by the bridge for chat turns
+```
+
+The bridge reports its active executable and sandbox mode through `GET /runtime/info`.
 
 ## CMS Integration
 
@@ -219,6 +314,17 @@ The examples in this README use placeholders like `YOUR_API_KEY`; replace them l
 | `DELETE` | `/chat/sessions` | Clear sessions |
 | `GET` | `/auth/device` | Device auth start |
 | `GET` | `/auth/status` | Auth status |
+
+## Runtime Info
+
+`GET /runtime/info` reports:
+
+- `runtime_kind`
+- `codex_command`
+- `sandbox_mode`
+- `workspace_root`
+- `runtime_config`
+- bridge load counters
 
 ## Architecture
 

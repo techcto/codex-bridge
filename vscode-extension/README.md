@@ -17,6 +17,9 @@ This is a lightweight VS Code extension for talking to `codex-bridge`.
 - surfaces clearer port, health, and runtime-config diagnostics when the bridge is unavailable or unhealthy
 - adds a status bar shortcut for opening chat quickly
 - adds a Codex Bridge activity-bar entry and sidebar
+- resolves native Codex from `codexBridge.localCodexPath`, bundled runtime, or `codex` on `PATH`
+- passes the active workspace root to the bridge so native Codex can edit files in place
+- forwards image attachments from the chat panel to the bridge/native Codex path
 
 ## Commands
 
@@ -150,6 +153,34 @@ When `codexBridge.autoStartLocalBridge` is enabled, the extension will also try 
 
 With the default settings, the extension also initializes on VS Code startup and shows a `Codex Bridge` status bar button for one-click access.
 
+## How VS Code Talks To Native Codex
+
+The current execution path is:
+
+```text
+VS Code chat panel
+  -> extension services/controllers
+  -> local codex-bridge sidecar
+  -> native Codex CLI or Codex App Server
+  -> streamed events back to the extension
+```
+
+Runtime resolution order:
+
+1. `codexBridge.localCodexPath`
+2. bundled runtime in `vscode-extension/bundled-runtime/<platform>/`
+3. `codex` on `PATH`
+
+The extension sends:
+
+- runtime provider/auth config
+- workspace root
+- active editor context
+- thread/session context
+- image attachments from the chat panel
+
+The bridge then launches native Codex with `workspace-write`, so file edits land in your real VS Code workspace.
+
 Recommended provider order:
 
 1. `openai`
@@ -178,6 +209,7 @@ Recommended local split:
 - `osirus_agent` uses the agent-scoped `/v1` endpoint.
 - Docker is optional for local development. The normal extension workflow is direct sidecar startup via `server.mjs`.
 - In local sidecar mode, the extension prefers `codexBridge.localCodexPath`, then a bundled Codex runtime, then `codex` on `PATH`.
+- The current attachment path is image-first. Image attachments are forwarded to native Codex; richer non-image attachment ingestion is still a future improvement.
 
 ## Local VSIX Test
 

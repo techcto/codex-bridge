@@ -149,12 +149,25 @@ codexruntimebuildwin() { codexruntimebuild "win32-x64"; }
 codexruntimebuildlinux() { codexruntimebuild "linux-x64"; }
 codexruntimebuildmac() { codexruntimebuild "darwin-arm64"; }
 
-maybe_bundle_default_windows_runtime() {
-  local default_windows_runtime="${RUNTIME_STAGE_ROOT}/win32-x64/codex.exe"
-  if [ -f "$default_windows_runtime" ]; then
-    echo "Detected Windows Codex runtime at tools/codex-runtime/win32-x64/codex.exe"
-    codexbridgebundle "win32-x64" "$default_windows_runtime"
+bundle_staged_runtime_if_present() {
+  local platform="$1"
+  local runtime_path="$2"
+
+  if [ ! -f "$runtime_path" ]; then
+    return 0
   fi
+
+  echo "Detected staged Codex runtime for ${platform}: ${runtime_path#$REPO_ROOT/}"
+  codexbridgebundle "$platform" "$runtime_path"
+}
+
+maybe_bundle_staged_runtimes() {
+  bundle_staged_runtime_if_present "win32-x64" "${RUNTIME_STAGE_ROOT}/win32-x64/codex.exe"
+  bundle_staged_runtime_if_present "win32-arm64" "${RUNTIME_STAGE_ROOT}/win32-arm64/codex.exe"
+  bundle_staged_runtime_if_present "linux-x64" "${RUNTIME_STAGE_ROOT}/linux-x64/codex"
+  bundle_staged_runtime_if_present "linux-arm64" "${RUNTIME_STAGE_ROOT}/linux-arm64/codex"
+  bundle_staged_runtime_if_present "darwin-x64" "${RUNTIME_STAGE_ROOT}/darwin-x64/codex"
+  bundle_staged_runtime_if_present "darwin-arm64" "${RUNTIME_STAGE_ROOT}/darwin-arm64/codex"
 }
 
 codexbridgevscodebuild() {
@@ -162,7 +175,7 @@ codexbridgevscodebuild() {
   require_cmd npm "npm is required to build the Codex Bridge VS Code extension." || return 1
   echo "Building Codex Bridge VS Code extension..."
   echo "Directory: ${EXTENSION_DIR#$REPO_ROOT/}"
-  maybe_bundle_default_windows_runtime
+  maybe_bundle_staged_runtimes
   (
     cd "$EXTENSION_DIR" || exit 1
     npm install
@@ -175,7 +188,7 @@ codexbridgevscodepackage() {
   require_cmd npm "npm is required to package the Codex Bridge VS Code extension." || return 1
   echo "Packaging Codex Bridge VS Code extension..."
   echo "Directory: ${EXTENSION_DIR#$REPO_ROOT/}"
-  maybe_bundle_default_windows_runtime
+  maybe_bundle_staged_runtimes
   (
     cd "$EXTENSION_DIR" || exit 1
     npm install

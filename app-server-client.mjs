@@ -37,6 +37,18 @@ export class AppServerClient extends EventEmitter {
     return this.#sendRequest(method, params);
   }
 
+  async respondToServerRequest(id, result = null, error = null) {
+    await this.start();
+    const payload = { id };
+    if (error) {
+      payload.error = error;
+    } else {
+      payload.result = result;
+    }
+
+    this.child.stdin.write(`${JSON.stringify(payload)}\n`);
+  }
+
   async #sendRequest(method, params = null) {
     const id = this.nextId++;
     const payload = { id, method };
@@ -166,18 +178,6 @@ export class AppServerClient extends EventEmitter {
   }
 
   #handleServerRequest(payload) {
-    const response = {
-      id: payload.id,
-      error: {
-        code: -32000,
-        message: `Unsupported App Server request: ${payload.method}`,
-      },
-    };
-
-    try {
-      this.child.stdin.write(`${JSON.stringify(response)}\n`);
-    } catch (error) {}
-
     this.emit('serverRequest', payload);
   }
 
