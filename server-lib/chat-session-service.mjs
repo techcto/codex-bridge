@@ -17,6 +17,39 @@ export class ChatSessionService {
   }
 
   static MAX_INLINE_EXEC_PROMPT_CHARS = 12000;
+  static MUTATING_TOOL_NAMES = new Set([
+    'write_file',
+    'append_file',
+    'replace_in_file',
+    'insert_in_file',
+    'delete_file',
+    'create_directory',
+    'move_file',
+    'copy_file',
+    'apply_patch',
+    'run_command',
+    'git_add',
+    'git_commit',
+    'git_checkout',
+  ]);
+
+  logPlanner(session, message) {
+    if (typeof this.deps.logBridge !== 'function') {
+      return;
+    }
+
+    const sessionId = String(session?.id || '').trim();
+    const prefix = sessionId ? `planner[${sessionId.slice(0, 8)}]` : 'planner';
+    this.deps.logBridge(`${prefix} ${String(message || '').trim()}`);
+  }
+
+  summarizePlannerText(value, maxChars = 220) {
+    const text = String(value || '').replace(/\s+/g, ' ').trim();
+    if (text.length <= maxChars) {
+      return text;
+    }
+    return `${text.slice(0, maxChars)}...`;
+  }
 
   getBridgeLoad() {
     return {
@@ -768,21 +801,7 @@ export class ChatSessionService {
   }
 
   requiresLocalApproval(toolName) {
-    return [
-      'write_file',
-      'append_file',
-      'replace_in_file',
-      'insert_in_file',
-      'delete_file',
-      'create_directory',
-      'move_file',
-      'copy_file',
-      'apply_patch',
-      'run_command',
-      'git_add',
-      'git_commit',
-      'git_checkout',
-    ].includes(String(toolName || '').trim());
+    return ChatSessionService.MUTATING_TOOL_NAMES.has(String(toolName || '').trim());
   }
 
   validateBridgeToolInput(toolName, input = {}) {
@@ -1030,6 +1049,7 @@ export class ChatSessionService {
     const maxSteps = 10;
 
     try {
+      this.logPlanner(session, `start message=${JSON.stringify(this.summarizePlannerText(message, 160))}`);
       for (let step = 0; step < maxSteps; step += 1) {
         const plannerPrompt = this.buildBridgeToolPlannerPrompt({
           session,
@@ -1037,19 +1057,24 @@ export class ChatSessionService {
           toolExecutor,
           toolHistory,
         });
+        this.logPlanner(session, `step=${step + 1}/${maxSteps} prompt_chars=${plannerPrompt.length} tool_history=${toolHistory.length}`);
         const assistantText = await this.runExecPrompt(session, plannerPrompt, step === 0 ? tempImagePaths : []);
+        this.logPlanner(session, `step=${step + 1} raw=${JSON.stringify(this.summarizePlannerText(assistantText))}`);
         let decision = this.parseBridgePlannerResponse(assistantText);
 
         if (!decision) {
+          this.logPlanner(session, `step=${step + 1} parse=failed repair=starting`);
           const repairedText = await this.runExecPrompt(
             session,
             this.buildBridgePlannerRepairPrompt(assistantText),
             [],
           );
+          this.logPlanner(session, `step=${step + 1} repair_raw=${JSON.stringify(this.summarizePlannerText(repairedText))}`);
           decision = this.parseBridgePlannerResponse(repairedText);
         }
 
         if (!decision) {
+          this.logPlanner(session, `step=${step + 1} parse=failed_final_fallback`);
           session.messages.push({
             id: randomUUID(),
             role: 'assistant',
@@ -1066,6 +1091,7 @@ export class ChatSessionService {
         }
 
         if (decision.type === 'final') {
+          this.logPlanner(session, `step=${step + 1} decision=final response=${JSON.stringify(this.summarizePlannerText(decision.response))}`);
           const finalText = decision.response || 'No response returned.';
           session.messages.push({
             id: randomUUID(),
@@ -1086,7 +1112,15 @@ export class ChatSessionService {
           throw new Error('Planner requested a tool step without naming a tool.');
         }
 
+        this.logPlanner(
+          session,
+          `step=${step + 1} decision=tool_call tool=${decision.tool} input=${JSON.stringify(decision.input || {})}`,
+        );
         const toolResult = await this.executeBridgeTool(session, toolExecutor, decision.tool, decision.input || {});
+        this.logPlanner(
+          session,
+          `step=${step + 1} tool_result tool=${decision.tool} ok=${toolResult?.ok === true} error=${JSON.stringify(toolResult?.error || '')}`,
+        );
         toolHistory.push({
           tool: decision.tool,
           input: decision.input || {},
@@ -1103,8 +1137,10 @@ export class ChatSessionService {
         });
       }
 
+      this.logPlanner(session, `error=max_steps_exceeded steps=${maxSteps}`);
       throw new Error(`Bridge tool planner exceeded ${maxSteps} steps without returning a final answer.`);
     } catch (error) {
+      this.logPlanner(session, `error=${JSON.stringify(error instanceof Error ? error.message : 'Bridge tool execution failed.')}`);
       session.status = 'error';
       session.running = false;
       session.pendingApproval = null;

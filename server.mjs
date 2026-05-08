@@ -435,6 +435,7 @@ chatSessionService = new ChatSessionService({
   getAppServerClient,
   getConfiguredWorkspaceRoot,
   getRecentAppServerStderr: () => recentAppServerStderr,
+  logBridge,
   maxConcurrentTurns,
   maxQueuedTurns,
   normalizeGeneratedHtml,
