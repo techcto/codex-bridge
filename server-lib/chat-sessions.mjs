@@ -3,13 +3,31 @@ import { randomUUID } from 'node:crypto';
 export function createChatSession(payload = {}) {
   const now = Date.now();
   const sessionId = randomUUID();
+  const messages = Array.isArray(payload.messages)
+    ? payload.messages
+        .map((message, index) => {
+          const record = message && typeof message === 'object' ? message : {};
+          const role = String(record.role || '').trim().toLowerCase();
+          const text = String(record.text || record.content || '').trim();
+          if (!['user', 'assistant', 'system'].includes(role) || !text) {
+            return null;
+          }
+          return {
+            id: String(record.id || '').trim() || `seed-${index + 1}`,
+            role,
+            text,
+            created_at: Number(record.created_at || record.createdAt || now) || now,
+          };
+        })
+        .filter(Boolean)
+    : [];
   return {
     id: sessionId,
     threadId: '',
     status: 'idle',
     mode: payload.mode === 'entity' ? 'entity' : 'workspace',
     context: payload.context && typeof payload.context === 'object' ? payload.context : {},
-    messages: [],
+    messages,
     events: [],
     pendingAttachments: [],
     pendingApproval: null,

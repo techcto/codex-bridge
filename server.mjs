@@ -308,14 +308,15 @@ async function getCodexWorkingDirectory() {
   return resolvedWorkingDirectory;
 }
 
-async function spawnCodex(args) {
+async function spawnCodex(args, options = {}) {
   await ensureRuntimeConfigApplied();
   const cwd = await getCodexWorkingDirectory();
+  const allowStdin = options?.allowStdin !== false;
 
   return spawn(codexBin, args, {
     env: buildCodexEnv(),
     cwd,
-    stdio: ['pipe', 'pipe', 'pipe'],
+    stdio: [allowStdin ? 'pipe' : 'ignore', 'pipe', 'pipe'],
   });
 }
 

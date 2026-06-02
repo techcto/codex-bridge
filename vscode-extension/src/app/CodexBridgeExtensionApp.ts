@@ -23,8 +23,6 @@ import {
 } from '../providers';
 import { resolveAgentRuntimeCapability } from '../agentCapabilities';
 import { escapeHtml } from '../ui/html';
-import { getChatWebviewHtml } from '../ui/chatWebviewHtml';
-import { buildSidebarHtml } from '../ui/sidebarHtml';
 import { CodexBridgeSidebarProvider } from '../ui/sidebarViewProvider';
 import { BridgeHttpClient } from '../services/BridgeHttpClient';
 import { BridgeRuntimeService } from '../services/BridgeRuntimeService';
@@ -157,6 +155,7 @@ function activateApp(context: vscode.ExtensionContext): void {
     },
   });
   osirusChatService = new OsirusChatService({
+    ensureActiveOrgSelection: async (options) => ensureOsirusActiveOrgSelection(options),
     getAccountApiBaseUrl: getOsirusAccountApiBaseUrl,
     getErrorMessage,
     getStoredActiveOrgId: getStoredOsirusActiveOrgId,
@@ -195,6 +194,7 @@ function activateApp(context: vscode.ExtensionContext): void {
     preferOsirusProductOption,
     runtimeProvider: getCurrentRuntimeProvider,
     setActiveThreadIdForProvider,
+    setStoredOpenOsirusChatId,
     updateStoredThreadMessages,
   });
   chatPanelController = new ChatPanelController({
@@ -202,6 +202,7 @@ function activateApp(context: vscode.ExtensionContext): void {
     createLocalChatThread,
     createLocalId,
     extractSessionId,
+    fetchOsirusChatSnapshot,
     fetchOsirusModelOptions,
     getCurrentRuntimeProvider,
     getErrorMessage,
@@ -258,8 +259,10 @@ function activateApp(context: vscode.ExtensionContext): void {
     refreshSidebar,
   });
   sidebarProvider = new CodexBridgeSidebarProvider({
+    buildState: async () => buildSidebarState(context),
     checkHealth,
     configureConnection,
+    controller: chatPanelController,
     getCurrentRuntimeProvider,
     getOsirusApiKeysUrl,
     getOsirusSignupUrl,
@@ -267,10 +270,8 @@ function activateApp(context: vscode.ExtensionContext): void {
     loginToOsirusAccount,
     logoutFromOsirus,
     logoutFromOsirusAccount,
-    openChat: async () => {
-      await openChatPanel();
-    },
     openExternal: vscode.env.openExternal,
+    outputChannel: bridgeOutputChannel,
     refreshOpenOsirusChatState: async () => {
       await refreshOpenOsirusChatState(context);
     },
@@ -292,7 +293,11 @@ function activateApp(context: vscode.ExtensionContext): void {
       await checkHealth();
     }),
     vscode.commands.registerCommand('codexBridge.openChat', async () => {
-      await openChatPanel();
+      if (getCurrentRuntimeProvider() !== 'osirus') {
+        await ensureLocalBridgeRunning();
+      }
+      sidebarProvider?.focus();
+      await pushChatPanelState(context);
     }),
     vscode.commands.registerCommand('codexBridge.startLocalBridge', async () => {
       await startLocalBridge(true);
@@ -414,13 +419,6 @@ async function checkHealth(): Promise<void> {
     throw new Error('Extension UI service is not ready.');
   }
   await extensionUiService.checkHealth();
-}
-
-async function openChatPanel(): Promise<void> {
-  if (!chatPanelHostService) {
-    throw new Error('Chat panel host service is not ready.');
-  }
-  await chatPanelHostService.open();
 }
 
 function getBaseUrl(): string {
@@ -748,26 +746,43 @@ async function buildChatPanelState(context: vscode.ExtensionContext): Promise<Re
   return chatPanelStateService.buildState();
 }
 
-async function pushChatPanelState(context: vscode.ExtensionContext): Promise<void> {
-  if (!chatPanelHostService?.hasOpenPanel()) {
-    return;
+async function buildSidebarState(context: vscode.ExtensionContext): Promise<Record<string, unknown>> {
+  if (!extensionUiService) {
+    throw new Error('Extension UI service is not ready.');
   }
-  await chatPanelHostService.pushState(await buildChatPanelState(context));
+  return {
+    ...await extensionUiService.getSidebarViewState(),
+    ...await buildChatPanelState(context),
+  };
+}
+
+async function pushChatPanelState(context: vscode.ExtensionContext): Promise<void> {
+  const payload = await buildSidebarState(context);
+  await sidebarProvider?.pushState(payload);
+  if (chatPanelHostService?.hasOpenPanel()) {
+    await chatPanelHostService.pushState(await buildChatPanelState(context));
+  }
 }
 
 async function ensureOsirusActiveOrgSelection(options?: {
   promptUser?: boolean;
   tokenOverride?: string;
   preferredOrgId?: string | null;
+  validateServerActiveOrg?: boolean;
 }): Promise<{ orgId: string; orgName: string }> {
   if (!osirusSessionService) {
     throw new Error('Osirus session service is not ready.');
   }
-  return osirusSessionService.ensureActiveOrgSelection(options);
+  const previousOrgId = await getStoredOsirusActiveOrgId();
+  const result = await osirusSessionService.ensureActiveOrgSelection(options);
+  if (osirusChatService && result.orgId && result.orgId !== previousOrgId) {
+    osirusChatService.clearModelOptionsCache();
+  }
+  return result;
 }
 
 async function refreshOpenOsirusChatState(context: vscode.ExtensionContext): Promise<void> {
-  if (!chatPanelHostService?.hasOpenPanel() || getCurrentRuntimeProvider() !== 'osirus' || !(await hasOsirusAccountSession())) {
+  if (getCurrentRuntimeProvider() !== 'osirus' || !(await hasOsirusAccountSession())) {
     return;
   }
   await pushChatPanelState(context);
@@ -793,10 +808,9 @@ async function requestOsirusJson<T>(
 }
 
 async function fetchOsirusModelOptions(): Promise<OsirusModelOption[]> {
-  if (!osirusSessionService || !osirusChatService) {
+  if (!osirusChatService) {
     throw new Error('Osirus services are not ready.');
   }
-  await osirusSessionService.ensureActiveOrgSelection({ promptUser: false });
   return osirusChatService.fetchModelOptions();
 }
 
@@ -1096,7 +1110,7 @@ function getBridgeState(): 'ready' | 'starting' | 'stopped' | 'remote' {
     || (isLocalBaseUrl() ? (shouldManageLocalBridge() ? 'starting' : 'stopped') : 'remote');
 }
 
-async function getSidebarHtml(): Promise<string> {
+function getSidebarHtml(): string {
   if (!extensionUiService) {
     throw new Error('Extension UI service is not ready.');
   }

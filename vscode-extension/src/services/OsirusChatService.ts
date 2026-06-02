@@ -6,6 +6,11 @@ import type {
 } from '../types';
 
 export type OsirusChatServiceDeps = {
+  ensureActiveOrgSelection?: (options?: {
+    promptUser?: boolean;
+    preferredOrgId?: string | null;
+    validateServerActiveOrg?: boolean;
+  }) => Promise<{ orgId: string; orgName: string }>;
   getAccountApiBaseUrl: () => string;
   getErrorMessage: (error: unknown) => string;
   getStoredActiveOrgId: () => Promise<string>;
@@ -33,6 +38,14 @@ export class OsirusChatService {
     this.deps = deps;
   }
 
+  public clearModelOptionsCache(): void {
+    this.modelOptionsCache = null;
+    this.modelOptionsCacheOrgId = '';
+    this.modelOptionsFetchedAt = 0;
+    this.modelOptionsPromise = null;
+    this.modelOptionsPromiseOrgId = '';
+  }
+
   public async fetchModelOptions(): Promise<OsirusModelOption[]> {
     const activeOrgId = String(await this.deps.getStoredActiveOrgId()).trim();
     const now = Date.now();
@@ -54,10 +67,14 @@ export class OsirusChatService {
 
     try {
       const options = await requestPromise;
+      const resolvedOrgId = String(await this.deps.getStoredActiveOrgId()).trim() || activeOrgId;
+      if (!options.length && this.modelOptionsCache && this.modelOptionsCacheOrgId === resolvedOrgId) {
+        return this.modelOptionsCache;
+      }
       this.modelOptionsCache = options;
-      this.modelOptionsCacheOrgId = activeOrgId;
+      this.modelOptionsCacheOrgId = resolvedOrgId;
       this.modelOptionsFetchedAt = Date.now();
-      return options;
+      return options.length ? options : (this.modelOptionsCache || []);
     } finally {
       if (this.modelOptionsPromise === requestPromise) {
         this.modelOptionsPromise = null;
@@ -67,6 +84,17 @@ export class OsirusChatService {
   }
 
   private async fetchModelOptionsUncached(activeOrgId: string): Promise<OsirusModelOption[]> {
+    if (this.deps.ensureActiveOrgSelection && activeOrgId) {
+      try {
+        await this.deps.ensureActiveOrgSelection({
+          promptUser: false,
+          preferredOrgId: activeOrgId,
+          validateServerActiveOrg: true,
+        });
+      } catch (error) {
+        this.deps.outputChannel?.appendLine(`[bridge] Osirus org sync warning before model load: ${this.deps.getErrorMessage(error)}`);
+      }
+    }
     this.deps.outputChannel?.appendLine(`[bridge] loading Osirus model options for org=${activeOrgId || '(none)'}`);
     let productsPayload: any = {};
     try {

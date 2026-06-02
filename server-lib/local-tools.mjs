@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process';
 import { copyFile, mkdir, mkdtemp, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 export const LOCAL_TOOL_DEFINITIONS = [
@@ -13,6 +13,7 @@ export const LOCAL_TOOL_DEFINITIONS = [
       properties: {
         path: { type: 'string' },
         pattern: { type: 'string' },
+        limit: { type: 'integer' },
       },
       additionalProperties: false,
     },
@@ -85,17 +86,21 @@ export const LOCAL_TOOL_DEFINITIONS = [
   },
   {
     name: 'insert_in_file',
-    description: 'Insert text before or after an anchor string in a workspace file.',
+    description: 'Insert text before or after an anchor string, or at the start/end of a workspace file.',
     input_schema: {
       type: 'object',
       properties: {
         path: { type: 'string' },
         anchor_text: { type: 'string' },
+        anchorText: { type: 'string' },
+        anchor: { type: 'string' },
+        search_text: { type: 'string' },
         text: { type: 'string' },
-        position: { type: 'string', enum: ['before', 'after'] },
+        position: { type: 'string', enum: ['before', 'after', 'start', 'end', 'beginning'] },
+        location: { type: 'string', enum: ['start', 'end', 'beginning'] },
         occurrence: { type: 'string', enum: ['first', 'last'] },
       },
-      required: ['path', 'anchor_text', 'text'],
+      required: ['path', 'text'],
       additionalProperties: false,
     },
   },
@@ -130,10 +135,11 @@ export const LOCAL_TOOL_DEFINITIONS = [
     input_schema: {
       type: 'object',
       properties: {
+        source: { type: 'string' },
+        destination: { type: 'string' },
         source_path: { type: 'string' },
         destination_path: { type: 'string' },
       },
-      required: ['source_path', 'destination_path'],
       additionalProperties: false,
     },
   },
@@ -143,10 +149,11 @@ export const LOCAL_TOOL_DEFINITIONS = [
     input_schema: {
       type: 'object',
       properties: {
+        source: { type: 'string' },
+        destination: { type: 'string' },
         source_path: { type: 'string' },
         destination_path: { type: 'string' },
       },
-      required: ['source_path', 'destination_path'],
       additionalProperties: false,
     },
   },
@@ -253,6 +260,8 @@ export const LOCAL_TOOL_DEFINITIONS = [
       type: 'object',
       properties: {
         limit: { type: 'integer' },
+        author: { type: 'string' },
+        options: { type: 'string' },
       },
       additionalProperties: false,
     },
@@ -264,6 +273,10 @@ export const LOCAL_TOOL_DEFINITIONS = [
       type: 'object',
       properties: {
         revspec: { type: 'string' },
+        revision: { type: 'string' },
+        commit: { type: 'string' },
+        name_only: { type: 'boolean' },
+        stat: { type: 'boolean' },
       },
       additionalProperties: false,
     },
@@ -401,6 +414,166 @@ function resolveWorkspacePath(workspaceRoot, relativePath = '') {
   return target;
 }
 
+function getLineNumberFromOffset(text = '', offset = 0) {
+  const safeOffset = Math.max(0, Math.min(Number(offset) || 0, String(text || '').length));
+  return String(text || '').slice(0, safeOffset).split('\n').length;
+}
+
+function normalizeLookupName(value = '') {
+  return String(value || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+}
+
+function parseGitRemoteUrl(remoteUrl = '') {
+  const value = String(remoteUrl || '').trim();
+  if (!value) {
+    return null;
+  }
+
+  const sshMatch = value.match(/^git@([^:]+):(.+?)(?:\.git)?$/i);
+  if (sshMatch) {
+    return {
+      host: String(sshMatch[1] || '').trim().toLowerCase(),
+      repoPath: String(sshMatch[2] || '').trim().replace(/\.git$/i, ''),
+    };
+  }
+
+  try {
+    const url = new URL(value);
+    return {
+      host: String(url.hostname || '').trim().toLowerCase(),
+      repoPath: String(url.pathname || '').trim().replace(/^\/+/, '').replace(/\.git$/i, ''),
+    };
+  } catch (_error) {
+    return null;
+  }
+}
+
+function buildCommitUrl(remoteUrl = '', commitSha = '') {
+  const parsed = parseGitRemoteUrl(remoteUrl);
+  const sha = String(commitSha || '').trim();
+  if (!parsed || !sha || !parsed.repoPath) {
+    return '';
+  }
+
+  if (parsed.host.includes('github.com')) {
+    return `https://${parsed.host}/${parsed.repoPath}/commit/${sha}`;
+  }
+
+  if (parsed.host.includes('bitbucket.org')) {
+    return `https://${parsed.host}/${parsed.repoPath}/commits/${sha}`;
+  }
+
+  if (parsed.host.includes('gitlab')) {
+    return `https://${parsed.host}/${parsed.repoPath}/-/commit/${sha}`;
+  }
+
+  return '';
+}
+
+const DEFAULT_LIST_FILES_LIMIT = 1000;
+const MAX_LIST_FILES_LIMIT = 5000;
+const LIST_FILES_SKIPPED_DIRECTORIES = new Set([
+  '.git',
+  '.hg',
+  '.svn',
+  '.cache',
+  '.next',
+  '.turbo',
+  '.venv',
+  '__pycache__',
+  'build',
+  'coverage',
+  'dist',
+  'node_modules',
+  'out',
+  'target',
+  'venv',
+]);
+
+function clampListFilesLimit(value) {
+  const parsed = Number.parseInt(String(value ?? ''), 10);
+  if (!Number.isFinite(parsed)) {
+    return DEFAULT_LIST_FILES_LIMIT;
+  }
+  return Math.max(1, Math.min(parsed, MAX_LIST_FILES_LIMIT));
+}
+
+function splitToolOutputLines(output = '') {
+  return String(output || '')
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+}
+
+function formatListFilesResult({ files, limit, root, source, tool = 'list_files' }) {
+  const truncated = files.length > limit;
+  const visibleFiles = truncated ? files.slice(0, limit) : files;
+  return {
+    ok: true,
+    tool,
+    root,
+    output: visibleFiles.join('\n'),
+    files: visibleFiles,
+    count: visibleFiles.length,
+    truncated,
+    limit,
+    source,
+    message: truncated ? `Output limited to the first ${limit} files. Pass a narrower path, pattern, or higher limit for more.` : undefined,
+  };
+}
+
+async function listFilesFromDisk(workspaceRoot, relativePath, { pattern = '', limit = DEFAULT_LIST_FILES_LIMIT } = {}) {
+  const targetPath = resolveWorkspacePath(workspaceRoot, relativePath);
+  const files = [];
+  const normalizedRoot = resolve(workspaceRoot);
+
+  const addFile = (absolutePath) => {
+    const relativeFilePath = relative(normalizedRoot, absolutePath).replaceAll('\\', '/');
+    if (!relativeFilePath || (pattern && !relativeFilePath.includes(pattern))) {
+      return;
+    }
+    files.push(relativeFilePath);
+  };
+
+  const visitDirectory = async (absolutePath) => {
+    if (files.length > limit) {
+      return;
+    }
+
+    const entries = await readdir(absolutePath, { withFileTypes: true });
+    entries.sort((left, right) => left.name.localeCompare(right.name));
+
+    for (const entry of entries) {
+      if (files.length > limit) {
+        return;
+      }
+
+      const entryPath = join(absolutePath, entry.name);
+      if (entry.isDirectory()) {
+        if (!LIST_FILES_SKIPPED_DIRECTORIES.has(entry.name)) {
+          await visitDirectory(entryPath);
+        }
+        continue;
+      }
+
+      if (entry.isFile()) {
+        addFile(entryPath);
+      }
+    }
+  };
+
+  const details = await stat(targetPath);
+  if (details.isFile()) {
+    addFile(targetPath);
+  } else if (details.isDirectory()) {
+    await visitDirectory(targetPath);
+  } else {
+    throw new Error('list_files only supports files and directories.');
+  }
+
+  return files;
+}
+
 function getShellCandidates() {
   const candidates = [];
   const pushCandidate = (command, args) => {
@@ -509,6 +682,93 @@ function runShellCommand(command, { cwd, timeoutMs = 20000 } = {}) {
   });
 }
 
+async function resolveExistingWorkspaceFile(workspaceRoot, requestedPath = '') {
+  const trimmedPath = String(requestedPath || '').trim();
+  if (!trimmedPath) {
+    throw new Error('A workspace path is required.');
+  }
+
+  const exactPath = resolveWorkspacePath(workspaceRoot, trimmedPath);
+  try {
+    await stat(exactPath);
+    return {
+      absolutePath: exactPath,
+      relativePath: relative(workspaceRoot, exactPath).replaceAll('\\', '/'),
+    };
+  } catch (error) {
+    if (error?.code !== 'ENOENT') {
+      throw error;
+    }
+  }
+
+  if (
+    trimmedPath.includes('/') ||
+    trimmedPath.includes('\\') ||
+    trimmedPath.startsWith('.') ||
+    isAbsolute(trimmedPath) ||
+    isWindowsAbsolutePath(trimmedPath)
+  ) {
+    throw new Error(`ENOENT: no such file or directory, open '${exactPath}'`);
+  }
+
+  const fileName = basename(trimmedPath);
+  const exactMatches = [];
+  try {
+    const exactResult = await runShellCommand(`rg --files . -g ${JSON.stringify(`**/${fileName}`)} -g ${JSON.stringify(fileName)}`, {
+      cwd: workspaceRoot,
+      timeoutMs: 10000,
+    });
+    exactMatches.push(...String(exactResult.stdout || '').split(/\r?\n/).map((line) => line.trim()).filter(Boolean));
+  } catch (_error) {}
+
+  const dedupedExactMatches = [...new Set(exactMatches)];
+  if (dedupedExactMatches.length === 1) {
+    const matchedRelativePath = dedupedExactMatches[0];
+    return {
+      absolutePath: resolveWorkspacePath(workspaceRoot, matchedRelativePath),
+      relativePath: matchedRelativePath.replaceAll('\\', '/'),
+    };
+  }
+  if (dedupedExactMatches.length > 1) {
+    throw new Error(`Multiple workspace files match '${trimmedPath}': ${dedupedExactMatches.slice(0, 8).join(', ')}`);
+  }
+
+  const normalizedRequestedName = normalizeLookupName(fileName);
+  if (!normalizedRequestedName) {
+    throw new Error(`ENOENT: no such file or directory, open '${exactPath}'`);
+  }
+
+  try {
+    const fuzzyResult = await runShellCommand('rg --files .', {
+      cwd: workspaceRoot,
+      timeoutMs: 15000,
+    });
+    const fuzzyMatches = String(fuzzyResult.stdout || '')
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .filter((line) => normalizeLookupName(basename(line)) === normalizedRequestedName);
+
+    const dedupedFuzzyMatches = [...new Set(fuzzyMatches)];
+    if (dedupedFuzzyMatches.length === 1) {
+      const matchedRelativePath = dedupedFuzzyMatches[0];
+      return {
+        absolutePath: resolveWorkspacePath(workspaceRoot, matchedRelativePath),
+        relativePath: matchedRelativePath.replaceAll('\\', '/'),
+      };
+    }
+    if (dedupedFuzzyMatches.length > 1) {
+      throw new Error(`Multiple workspace files closely match '${trimmedPath}': ${dedupedFuzzyMatches.slice(0, 8).join(', ')}`);
+    }
+  } catch (error) {
+    if (String(error?.message || '').includes('Multiple workspace files')) {
+      throw error;
+    }
+  }
+
+  throw new Error(`ENOENT: no such file or directory, open '${exactPath}'`);
+}
+
 export class LocalToolExecutor {
   constructor({ workspaceRoot }) {
     this.workspaceRoot = resolve(workspaceRoot);
@@ -580,37 +840,46 @@ export class LocalToolExecutor {
   async listFiles(input = {}) {
     const relativePath = String(input.path || '.').trim() || '.';
     const pattern = String(input.pattern || '').trim();
-    const escapedPath = relativePath.replaceAll('"', '\\"');
-    const commands = [
-      pattern
-        ? `rg --files "${escapedPath}" | rg ${JSON.stringify(pattern)}`
-        : `rg --files "${escapedPath}"`,
-      pattern
-        ? `find "${escapedPath}" -type f | grep ${JSON.stringify(pattern)}`
-        : `find "${escapedPath}" -type f`,
-    ];
+    const limit = clampListFilesLimit(input.limit);
+    const targetPath = resolveWorkspacePath(this.workspaceRoot, relativePath);
+    const normalizedRelativePath = relative(this.workspaceRoot, targetPath).replaceAll('\\', '/') || '.';
+    const commandPath = normalizedRelativePath === '.' ? '.' : normalizedRelativePath;
+    const headLimit = limit + 1;
 
-    let lastError = null;
-    let result = null;
-    for (const command of commands) {
-      try {
-        result = await runShellCommand(command, { cwd: this.workspaceRoot, timeoutMs: 10000 });
-        break;
-      } catch (error) {
-        lastError = error;
-      }
+    try {
+      const grepSegment = pattern ? ` | grep ${JSON.stringify(pattern)}` : '';
+      const rgCommand = `command -v rg >/dev/null 2>&1 || exit 127; rg --files ${JSON.stringify(commandPath)}${grepSegment} | head -n ${headLimit}`;
+      const result = await runShellCommand(rgCommand, { cwd: this.workspaceRoot, timeoutMs: 10000 });
+      const files = splitToolOutputLines(result.stdout);
+      return formatListFilesResult({
+        files,
+        limit,
+        root: this.workspaceRoot,
+        source: 'rg',
+      });
+    } catch (_error) {}
+
+    try {
+      await runShellCommand('git rev-parse --is-inside-work-tree', { cwd: this.workspaceRoot, timeoutMs: 3000 });
+      const grepSegment = pattern ? ` | grep ${JSON.stringify(pattern)}` : '';
+      const gitCommand = `git ls-files --cached --others --exclude-standard -- ${JSON.stringify(commandPath)}${grepSegment} | head -n ${headLimit}`;
+      const result = await runShellCommand(gitCommand, { cwd: this.workspaceRoot, timeoutMs: 10000 });
+      const files = splitToolOutputLines(result.stdout);
+      return formatListFilesResult({
+        files,
+        limit,
+        root: this.workspaceRoot,
+        source: 'git',
+      });
+    } catch (_error) {
+      const files = await listFilesFromDisk(this.workspaceRoot, relativePath, { pattern, limit });
+      return formatListFilesResult({
+        files,
+        limit,
+        root: this.workspaceRoot,
+        source: 'filesystem',
+      });
     }
-
-    if (!result) {
-      throw (lastError || new Error('Unable to list files in the workspace.'));
-    }
-
-    return {
-      ok: true,
-      tool: 'list_files',
-      root: this.workspaceRoot,
-      output: result.stdout,
-    };
   }
 
   async readFile(input = {}) {
@@ -618,12 +887,13 @@ export class LocalToolExecutor {
     if (!relativePath) {
       throw new Error('read_file requires a path.');
     }
-    const filePath = resolveWorkspacePath(this.workspaceRoot, relativePath);
+    const resolvedFile = await resolveExistingWorkspaceFile(this.workspaceRoot, relativePath);
+    const filePath = resolvedFile.absolutePath;
     const content = await readFile(filePath, 'utf8');
     return {
       ok: true,
       tool: 'read_file',
-      path: relativePath,
+      path: resolvedFile.relativePath,
       content,
     };
   }
@@ -658,6 +928,7 @@ export class LocalToolExecutor {
       ok: true,
       tool: 'write_file',
       path: relativePath,
+      line_number: 1,
       bytes_written: Buffer.byteLength(content, 'utf8'),
     };
   }
@@ -668,7 +939,8 @@ export class LocalToolExecutor {
       throw new Error('append_file requires a path.');
     }
 
-    const filePath = resolveWorkspacePath(this.workspaceRoot, relativePath);
+    const resolvedFile = await resolveExistingWorkspaceFile(this.workspaceRoot, relativePath);
+    const filePath = resolvedFile.absolutePath;
     const existing = await readFile(filePath, 'utf8').catch((error) => {
       if (error?.code === 'ENOENT') {
         return '';
@@ -678,10 +950,14 @@ export class LocalToolExecutor {
     const content = String(input.content || '');
     const nextContent = `${existing}${content}`;
     await writeFile(filePath, nextContent, 'utf8');
+    const lineNumber = existing
+      ? existing.split('\n').length
+      : 1;
     return {
       ok: true,
       tool: 'append_file',
-      path: relativePath,
+      path: resolvedFile.relativePath,
+      line_number: lineNumber,
       bytes_written: Buffer.byteLength(content, 'utf8'),
     };
   }
@@ -699,7 +975,8 @@ export class LocalToolExecutor {
       throw new Error('replace_in_file requires old_text.');
     }
 
-    const filePath = resolveWorkspacePath(this.workspaceRoot, relativePath);
+    const resolvedFile = await resolveExistingWorkspaceFile(this.workspaceRoot, relativePath);
+    const filePath = resolvedFile.absolutePath;
     const original = await readFile(filePath, 'utf8');
     if (!original.includes(oldText)) {
       throw new Error('replace_in_file could not find the target text.');
@@ -709,6 +986,7 @@ export class LocalToolExecutor {
       ? original.split(oldText).join(newText)
       : original.replace(oldText, newText);
     await writeFile(filePath, nextContent, 'utf8');
+    const firstMatchIndex = original.indexOf(oldText);
 
     const replacementCount = replaceAll
       ? original.split(oldText).length - 1
@@ -717,27 +995,52 @@ export class LocalToolExecutor {
     return {
       ok: true,
       tool: 'replace_in_file',
-      path: relativePath,
+      path: resolvedFile.relativePath,
+      line_number: getLineNumberFromOffset(original, firstMatchIndex),
       replacements: replacementCount,
     };
   }
 
   async insertInFile(input = {}) {
     const relativePath = String(input.path || '').trim();
-    const anchorText = String(input.anchor_text || '');
+    const rawPosition = String(input.position || input.location || 'after').trim().toLowerCase();
+    const anchorText = String(
+      input.anchor_text
+      || input.anchorText
+      || input.anchor
+      || input.search_text
+      || '',
+    );
     const text = String(input.text || '');
-    const position = String(input.position || 'after').trim().toLowerCase() === 'before' ? 'before' : 'after';
+    const position = ['start', 'beginning', 'top'].includes(rawPosition)
+      ? 'start'
+      : (['end', 'bottom'].includes(rawPosition) ? 'end' : (rawPosition === 'before' ? 'before' : 'after'));
     const occurrence = String(input.occurrence || 'first').trim().toLowerCase() === 'last' ? 'last' : 'first';
 
     if (!relativePath) {
       throw new Error('insert_in_file requires a path.');
     }
-    if (anchorText === '') {
-      throw new Error('insert_in_file requires anchor_text.');
+
+    const resolvedFile = await resolveExistingWorkspaceFile(this.workspaceRoot, relativePath);
+    const filePath = resolvedFile.absolutePath;
+    const original = await readFile(filePath, 'utf8');
+    if (position === 'start' || position === 'end') {
+      const insertionPoint = position === 'start' ? 0 : original.length;
+      const nextContent = `${original.slice(0, insertionPoint)}${text}${original.slice(insertionPoint)}`;
+      await writeFile(filePath, nextContent, 'utf8');
+      return {
+        ok: true,
+        tool: 'insert_in_file',
+        path: resolvedFile.relativePath,
+        line_number: getLineNumberFromOffset(original, insertionPoint),
+        position,
+      };
     }
 
-    const filePath = resolveWorkspacePath(this.workspaceRoot, relativePath);
-    const original = await readFile(filePath, 'utf8');
+    if (anchorText === '') {
+      throw new Error('insert_in_file requires anchor_text (or anchorText, anchor, search_text) unless position is start or end.');
+    }
+
     const index = occurrence === 'last' ? original.lastIndexOf(anchorText) : original.indexOf(anchorText);
     if (index === -1) {
       throw new Error('insert_in_file could not find the anchor_text.');
@@ -749,7 +1052,8 @@ export class LocalToolExecutor {
     return {
       ok: true,
       tool: 'insert_in_file',
-      path: relativePath,
+      path: resolvedFile.relativePath,
+      line_number: getLineNumberFromOffset(original, insertionPoint),
       position,
       occurrence,
     };
@@ -761,7 +1065,8 @@ export class LocalToolExecutor {
       throw new Error('delete_file requires a path.');
     }
 
-    const filePath = resolveWorkspacePath(this.workspaceRoot, relativePath);
+    const resolvedFile = await resolveExistingWorkspaceFile(this.workspaceRoot, relativePath);
+    const filePath = resolvedFile.absolutePath;
     const details = await stat(filePath);
     if (!details.isFile()) {
       throw new Error('delete_file only supports files.');
@@ -771,7 +1076,7 @@ export class LocalToolExecutor {
     return {
       ok: true,
       tool: 'delete_file',
-      path: relativePath,
+      path: resolvedFile.relativePath,
       deleted: true,
     };
   }
@@ -793,39 +1098,41 @@ export class LocalToolExecutor {
   }
 
   async moveFile(input = {}) {
-    const sourcePath = String(input.source_path || '').trim();
-    const destinationPath = String(input.destination_path || '').trim();
+    const sourcePath = String(input.source_path || input.source || '').trim();
+    const destinationPath = String(input.destination_path || input.destination || '').trim();
     if (!sourcePath || !destinationPath) {
       throw new Error('move_file requires source_path and destination_path.');
     }
 
-    const sourceFilePath = resolveWorkspacePath(this.workspaceRoot, sourcePath);
+    const resolvedSourceFile = await resolveExistingWorkspaceFile(this.workspaceRoot, sourcePath);
+    const sourceFilePath = resolvedSourceFile.absolutePath;
     const destinationFilePath = resolveWorkspacePath(this.workspaceRoot, destinationPath);
     await mkdir(dirname(destinationFilePath), { recursive: true });
     await rename(sourceFilePath, destinationFilePath);
     return {
       ok: true,
       tool: 'move_file',
-      source_path: sourcePath,
+      source_path: resolvedSourceFile.relativePath,
       destination_path: destinationPath,
     };
   }
 
   async copyFile(input = {}) {
-    const sourcePath = String(input.source_path || '').trim();
-    const destinationPath = String(input.destination_path || '').trim();
+    const sourcePath = String(input.source_path || input.source || '').trim();
+    const destinationPath = String(input.destination_path || input.destination || '').trim();
     if (!sourcePath || !destinationPath) {
       throw new Error('copy_file requires source_path and destination_path.');
     }
 
-    const sourceFilePath = resolveWorkspacePath(this.workspaceRoot, sourcePath);
+    const resolvedSourceFile = await resolveExistingWorkspaceFile(this.workspaceRoot, sourcePath);
+    const sourceFilePath = resolvedSourceFile.absolutePath;
     const destinationFilePath = resolveWorkspacePath(this.workspaceRoot, destinationPath);
     await mkdir(dirname(destinationFilePath), { recursive: true });
     await copyFile(sourceFilePath, destinationFilePath);
     return {
       ok: true,
       tool: 'copy_file',
-      source_path: sourcePath,
+      source_path: resolvedSourceFile.relativePath,
       destination_path: destinationPath,
     };
   }
@@ -839,15 +1146,32 @@ export class LocalToolExecutor {
     const targetPath = resolveWorkspacePath(this.workspaceRoot, relativePath);
     const exists = await stat(targetPath).then(() => true).catch((error) => {
       if (error?.code === 'ENOENT') {
-        return false;
+        return null;
       }
       throw error;
     });
+    if (exists === true) {
+      return {
+        ok: true,
+        tool: 'path_exists',
+        path: relativePath,
+        exists: true,
+      };
+    }
+    try {
+      const resolvedFile = await resolveExistingWorkspaceFile(this.workspaceRoot, relativePath);
+      return {
+        ok: true,
+        tool: 'path_exists',
+        path: resolvedFile.relativePath,
+        exists: true,
+      };
+    } catch (_error) {}
     return {
       ok: true,
       tool: 'path_exists',
       path: relativePath,
-      exists,
+      exists: false,
     };
   }
 
@@ -857,12 +1181,13 @@ export class LocalToolExecutor {
       throw new Error('stat_file requires a path.');
     }
 
-    const targetPath = resolveWorkspacePath(this.workspaceRoot, relativePath);
+    const resolvedFile = await resolveExistingWorkspaceFile(this.workspaceRoot, relativePath);
+    const targetPath = resolvedFile.absolutePath;
     const details = await stat(targetPath);
     return {
       ok: true,
       tool: 'stat_file',
-      path: relativePath,
+      path: resolvedFile.relativePath,
       name: basename(targetPath),
       is_file: details.isFile(),
       is_directory: details.isDirectory(),
@@ -985,21 +1310,65 @@ export class LocalToolExecutor {
 
   async gitLog(input = {}) {
     const limit = Number.isInteger(input.limit) ? input.limit : 10;
-    const result = await runShellCommand(`git log -n ${Math.max(1, limit)} --oneline --decorate`, { cwd: this.workspaceRoot });
+    const author = String(input.author || '').trim();
+    const options = String(input.options || '').trim();
+    if (options && /[;&|`$<>]/.test(options)) {
+      throw new Error('git_log options contain unsupported shell characters.');
+    }
+    const authorArg = author ? ` --author=${JSON.stringify(author)}` : '';
+    const optionsArg = options ? ` ${options}` : '';
+    const result = await runShellCommand(`git log -n ${Math.max(1, limit)} --oneline --decorate${authorArg}${optionsArg}`, { cwd: this.workspaceRoot });
+    let remoteUrl = '';
+    try {
+      const remoteResult = await runShellCommand('git remote get-url origin', { cwd: this.workspaceRoot, timeoutMs: 5000 });
+      remoteUrl = String(remoteResult.stdout || '').trim();
+    } catch (_error) {}
+    const linkedOutput = String(result.stdout || '').split(/\r?\n/).map((line) => {
+      const match = String(line || '').match(/^([0-9a-f]{7,40})(\b.*)$/i);
+      if (!match) {
+        return line;
+      }
+      const sha = String(match[1] || '').trim();
+      const remainder = String(match[2] || '');
+      const commitUrl = buildCommitUrl(remoteUrl, sha);
+      if (!commitUrl) {
+        return line;
+      }
+      return `- [${sha}](${commitUrl})${remainder}`;
+    }).join('\n');
     return {
       ok: true,
       tool: 'git_log',
-      output: result.stdout,
+      author,
+      options: options || undefined,
+      output: linkedOutput || result.stdout,
+      remote_url: remoteUrl || undefined,
     };
   }
 
   async gitDiff(input = {}) {
-    const revspec = String(input.revspec || '').trim();
-    const command = revspec ? `git diff ${revspec}` : 'git diff';
-    const result = await runShellCommand(command, { cwd: this.workspaceRoot });
+    const revspec = String(input.revspec || input.revision || input.commit || '').trim();
+    const nameOnly = input.name_only !== false;
+    const stat = input.stat !== false;
+    let command = 'git diff';
+    let timeoutMs = 20000;
+
+    if (revspec) {
+      const formatFlags = [
+        '--format=medium',
+        nameOnly ? '--name-only' : '',
+        stat ? '--stat' : '',
+      ].filter(Boolean).join(' ');
+      command = `git show ${formatFlags} ${JSON.stringify(revspec)}`;
+      timeoutMs = 10000;
+    }
+
+    const result = await runShellCommand(command, { cwd: this.workspaceRoot, timeoutMs });
     return {
       ok: true,
       tool: 'git_diff',
+      revspec,
+      mode: revspec ? 'commit_show' : 'workspace_diff',
       output: result.stdout,
     };
   }

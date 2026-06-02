@@ -479,7 +479,9 @@ export class ChatSessionService {
     const prompt = this.deps.buildCodexPrompt({ session, message, attachments });
     const tempImagePaths = await materializeImageAttachments(attachments, this.deps.bridgeTempRoot);
     const invocation = this.buildExecInvocation({ session, prompt, imagePaths: tempImagePaths });
-    const child = await this.deps.spawnCodex(invocation.args);
+    const child = await this.deps.spawnCodex(invocation.args, {
+      allowStdin: Boolean(invocation.stdinText),
+    });
     this.feedChildStdin(child, invocation.stdinText);
 
     return new Promise((resolve, reject) => {
@@ -589,10 +591,12 @@ export class ChatSessionService {
           return;
         }
 
+        const assistantMessage = this.splitReasoningContent(assistantText || 'No response returned.');
         session.messages.push({
           id: randomUUID(),
           role: 'assistant',
-          text: assistantText || 'No response returned.',
+          text: assistantMessage.text || 'No response returned.',
+          thinking: assistantMessage.thinking || undefined,
           created_at: Date.now(),
         });
         this.publishSession(session, 'session.message');
@@ -603,7 +607,9 @@ export class ChatSessionService {
 
   async runExecPrompt(session, prompt, imagePaths = []) {
     const invocation = this.buildExecInvocation({ session, prompt, imagePaths, useResume: false });
-    const child = await this.deps.spawnCodex(invocation.args);
+    const child = await this.deps.spawnCodex(invocation.args, {
+      allowStdin: Boolean(invocation.stdinText),
+    });
     this.feedChildStdin(child, invocation.stdinText);
 
     return new Promise((resolve, reject) => {
@@ -677,6 +683,33 @@ export class ChatSessionService {
     const text = String(value || '').trim();
     const fencedMatch = text.match(/^```(?:json)?\s*([\s\S]*?)```$/i);
     return fencedMatch ? String(fencedMatch[1] || '').trim() : text;
+  }
+
+  splitReasoningContent(value) {
+    const rawText = String(value || '');
+    if (!rawText) {
+      return { text: '', thinking: '' };
+    }
+
+    const thinkingParts = [];
+    const textWithoutReasoning = rawText.replace(/<reasoning>([\s\S]*?)<\/reasoning>/gi, (_match, inner) => {
+      const thinking = String(inner || '').trim();
+      if (thinking) {
+        thinkingParts.push(thinking);
+      }
+      return '\n';
+    });
+
+    return {
+      text: textWithoutReasoning
+        .replace(/<\/?reasoning>/gi, '')
+        .replace(/\n{3,}/g, '\n\n')
+        .trim(),
+      thinking: thinkingParts
+        .join('\n\n')
+        .replace(/\n{3,}/g, '\n\n')
+        .trim(),
+    };
   }
 
   extractJsonObjectCandidate(value) {
@@ -785,12 +818,16 @@ export class ChatSessionService {
       '- Use write_file to replace full file contents when needed.',
       '- Use append_file to add content to the end of a file.',
       '- Use replace_in_file for precise local edits, but only after you know the exact old_text currently in the file.',
-      '- Use insert_in_file when you need to place new text around an existing anchor without rewriting the whole file.',
+      '- Use insert_in_file when you need to place new text around an existing anchor, or at position start/end, without rewriting the whole file.',
       '- Use create_directory before writing into a new folder.',
       '- Use move_file, copy_file, and delete_file for actual filesystem operations instead of simulating them with edits.',
       '- Use apply_patch only when a unified diff is the clearest representation.',
       '- Use read_multiple_files or grep_structured when you need structured cross-file inspection.',
+      '- If the user refers to a file informally or without a clear path, locate it first with find_files, read_directory, or path_exists before assuming it is at the workspace root.',
       '- Use git_show, git_add, git_commit, and git_checkout only when the user explicitly asked for git operations.',
+      '- For commit history questions, prefer git_log first.',
+      '- To inspect a specific commit or learn which files changed in a commit, prefer git_show or git_diff with a specific revspec/commit instead of a full workspace diff.',
+      '- If the user asks which files a commit changed, prefer a name-only or summary-style git inspection before requesting a full patch.',
       '- If an edit tool fails because required input is missing or the target text is not found, inspect the file and try again with a better tool input.',
       'Current conversation:',
       conversation || `USER:\n${message}`,
@@ -802,6 +839,30 @@ export class ChatSessionService {
 
   requiresLocalApproval(toolName) {
     return ChatSessionService.MUTATING_TOOL_NAMES.has(String(toolName || '').trim());
+  }
+
+  getUnresolvedFailedMutatingTool(toolHistory = []) {
+    for (let index = toolHistory.length - 1; index >= 0; index -= 1) {
+      const step = toolHistory[index] || {};
+      const toolName = String(step.tool || '').trim();
+      if (!ChatSessionService.MUTATING_TOOL_NAMES.has(toolName)) {
+        continue;
+      }
+
+      if (step.result?.ok === true) {
+        return null;
+      }
+
+      return step;
+    }
+
+    return null;
+  }
+
+  finalResponseAcknowledgesToolFailure(response = '') {
+    return /\b(failed|could(?: not|n't)|unable|not able|did(?: not|n't)|was(?: not|n't)|error|denied|not applied|not changed|no changes|requires|missing)\b/i.test(
+      String(response || ''),
+    );
   }
 
   validateBridgeToolInput(toolName, input = {}) {
@@ -839,11 +900,20 @@ export class ChatSessionService {
     }
 
     if (normalizedToolName === 'insert_in_file') {
+      const rawPosition = String(record.position || record.location || '').trim().toLowerCase();
+      const insertsAtBoundary = ['start', 'beginning', 'top', 'end', 'bottom'].includes(rawPosition);
+      const anchorText = String(
+        record.anchor_text
+        || record.anchorText
+        || record.anchor
+        || record.search_text
+        || '',
+      );
       if (!String(record.path || '').trim()) {
         return 'insert_in_file requires a path.';
       }
-      if (!String(record.anchor_text || '')) {
-        return 'insert_in_file requires anchor_text.';
+      if (!anchorText && !insertsAtBoundary) {
+        return 'insert_in_file requires anchor_text (or anchorText, anchor, search_text) unless position is start or end.';
       }
       if (!Object.prototype.hasOwnProperty.call(record, 'text')) {
         return 'insert_in_file requires text.';
@@ -859,13 +929,17 @@ export class ChatSessionService {
     }
 
     if (normalizedToolName === 'move_file') {
-      if (!String(record.source_path || '').trim() || !String(record.destination_path || '').trim()) {
+      const sourcePath = String(record.source_path || record.source || '').trim();
+      const destinationPath = String(record.destination_path || record.destination || '').trim();
+      if (!sourcePath || !destinationPath) {
         return 'move_file requires source_path and destination_path.';
       }
     }
 
     if (normalizedToolName === 'copy_file') {
-      if (!String(record.source_path || '').trim() || !String(record.destination_path || '').trim()) {
+      const sourcePath = String(record.source_path || record.source || '').trim();
+      const destinationPath = String(record.destination_path || record.destination || '').trim();
+      if (!sourcePath || !destinationPath) {
         return 'copy_file requires source_path and destination_path.';
       }
     }
@@ -1075,10 +1149,12 @@ export class ChatSessionService {
 
         if (!decision) {
           this.logPlanner(session, `step=${step + 1} parse=failed_final_fallback`);
+          const fallbackMessage = this.splitReasoningContent(assistantText.trim());
           session.messages.push({
             id: randomUUID(),
             role: 'assistant',
-            text: assistantText.trim() || 'I could not normalize the model response into a tool action.',
+            text: fallbackMessage.text || 'I could not normalize the model response into a tool action.',
+            thinking: fallbackMessage.thinking || undefined,
             created_at: Date.now(),
           });
           session.status = 'idle';
@@ -1092,11 +1168,28 @@ export class ChatSessionService {
 
         if (decision.type === 'final') {
           this.logPlanner(session, `step=${step + 1} decision=final response=${JSON.stringify(this.summarizePlannerText(decision.response))}`);
-          const finalText = decision.response || 'No response returned.';
+          const unresolvedFailedMutation = this.getUnresolvedFailedMutatingTool(toolHistory);
+          if (unresolvedFailedMutation && !this.finalResponseAcknowledgesToolFailure(decision.response)) {
+            const guardError = `Cannot claim success because ${unresolvedFailedMutation.tool} failed: ${unresolvedFailedMutation.result?.error || 'Tool execution failed.'}`;
+            this.logPlanner(session, `step=${step + 1} final=rejected_after_failed_mutation error=${JSON.stringify(this.summarizePlannerText(guardError))}`);
+            toolHistory.push({
+              tool: 'planner_final_guard',
+              input: {
+                rejected_response: decision.response || '',
+              },
+              result: {
+                ok: false,
+                error: guardError,
+              },
+            });
+            continue;
+          }
+          const finalMessage = this.splitReasoningContent(decision.response || 'No response returned.');
           session.messages.push({
             id: randomUUID(),
             role: 'assistant',
-            text: finalText,
+            text: finalMessage.text || 'No response returned.',
+            thinking: finalMessage.thinking || undefined,
             created_at: Date.now(),
           });
           session.status = 'idle';
@@ -1116,6 +1209,14 @@ export class ChatSessionService {
           session,
           `step=${step + 1} decision=tool_call tool=${decision.tool} input=${JSON.stringify(decision.input || {})}`,
         );
+        this.appendSessionEvent(session, {
+          type: 'bridge.planner.step',
+          preview: decision.explanation || `Running ${decision.tool}`,
+          tool: {
+            name: decision.tool,
+            input: decision.input || {},
+          },
+        });
         const toolResult = await this.executeBridgeTool(session, toolExecutor, decision.tool, decision.input || {});
         this.logPlanner(
           session,
@@ -1332,12 +1433,13 @@ export class ChatSessionService {
       return;
     }
 
-    const assistantText = this.getAssistantDraft(session).trim() || 'No response returned.';
+    const assistantMessage = this.splitReasoningContent(this.getAssistantDraft(session).trim() || 'No response returned.');
     session.assistantItems = new Map();
     session.messages.push({
       id: randomUUID(),
       role: 'assistant',
-      text: assistantText,
+      text: assistantMessage.text || 'No response returned.',
+      thinking: assistantMessage.thinking || undefined,
       created_at: Date.now(),
     });
     session.status = 'idle';
@@ -1426,12 +1528,25 @@ export class ChatSessionService {
         return;
       }
 
+      const itemPath =
+        String(
+          item.path
+          || item.filePath
+          || item.source_path
+          || item.destination_path
+          || item?.input?.path
+          || item?.input?.filePath
+          || item?.input?.source_path
+          || item?.input?.destination_path
+          || ''
+        ).trim();
       this.appendSessionEvent(session, {
         type: 'item.completed',
         preview: item.type || 'item',
         item: {
           type: item.type || 'item',
           text: item.command || item.text || item.query || '',
+          path: itemPath,
         },
       });
       return;

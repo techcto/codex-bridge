@@ -110,6 +110,7 @@ export class BridgeSessionService {
       onAssistantStart?: () => void;
       onAssistantDelta?: (delta: string) => void;
       onApprovalChange?: (approval: BridgeSessionRecord['pending_approval']) => void;
+      onSessionEvent?: (event: Record<string, unknown>) => void;
     }
   ): Promise<{ session: BridgeSessionRecord; assistantText: string }> {
     const url = `${this.deps.getBaseUrl()}/chat/sessions/${encodeURIComponent(sessionId)}/stream`;
@@ -153,6 +154,7 @@ export class BridgeSessionService {
     let closedOnTerminalEvent = false;
     let terminalAbortHandle: ReturnType<typeof setTimeout> | null = null;
     let lastApprovalKey = '';
+    let lastSessionEventKey = '';
 
     const closeStream = (delayMs = 0) => {
       if (closedOnTerminalEvent) {
@@ -179,6 +181,14 @@ export class BridgeSessionService {
         const session = data?.session;
         if (session) {
           latestSession = session;
+          const latestEvent = Array.isArray(session.events) ? session.events[session.events.length - 1] : null;
+          const latestEventKey = latestEvent && typeof latestEvent === 'object'
+            ? `${String((latestEvent as Record<string, unknown>).type || '')}:${String((latestEvent as Record<string, unknown>).received_at || '')}`
+            : '';
+          if (latestEvent && latestEventKey && latestEventKey !== lastSessionEventKey) {
+            lastSessionEventKey = latestEventKey;
+            options?.onSessionEvent?.(latestEvent as Record<string, unknown>);
+          }
           const approval = session.pending_approval || null;
           const approvalKey = approval?.request_id ? String(approval.request_id) : '';
           if (approvalKey !== lastApprovalKey || (!approval && lastApprovalKey !== '')) {

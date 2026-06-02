@@ -68,6 +68,7 @@ export type BridgeSessionRecord = {
   messages?: Array<{
     role?: string;
     text?: string;
+    thinking?: string;
   }>;
 };
 
@@ -153,6 +154,7 @@ export type LocalChatMessage = {
   id: string;
   role: LocalChatMessageRole;
   content: string;
+  thinking?: string;
   createdAt: number;
 };
 

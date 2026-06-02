@@ -6,7 +6,6 @@ import {
   getProviderSetupSummary,
   providerNeedsSavedApiKey,
 } from '../providers';
-import { escapeHtml } from '../ui/html';
 import { buildSidebarHtml } from '../ui/sidebarHtml';
 import type { AuthMode, BridgeHealthResponse, RuntimeProvider } from '../types';
 
@@ -186,27 +185,29 @@ export class ExtensionUiService {
     return this.deps.getBridgeState();
   }
 
-  public async getSidebarHtml(): Promise<string> {
-    const baseUrl = escapeHtml(this.deps.getBaseUrl());
+  public getSidebarHtml(): string {
+    return buildSidebarHtml();
+  }
+
+  public async getSidebarViewState(): Promise<Record<string, unknown>> {
     const runtimeProvider = this.deps.getCurrentRuntimeProvider();
     const authMode = this.deps.getCurrentAuthMode();
-    const provider = escapeHtml(runtimeProvider);
-    const providerDisplayName = escapeHtml(getProviderDisplayName(runtimeProvider));
-    const providerIcon = escapeHtml(getProviderIcon(runtimeProvider));
+    const provider = runtimeProvider;
+    const providerDisplayName = getProviderDisplayName(runtimeProvider);
+    const providerIcon = getProviderIcon(runtimeProvider);
     const requiresSavedApiKey = providerNeedsSavedApiKey(runtimeProvider, authMode);
     const signedIn = runtimeProvider === 'osirus'
       ? await this.deps.hasOsirusAccountSession()
       : (requiresSavedApiKey ? await this.deps.hasSavedApiKey() : true);
-    const runtime = escapeHtml(await this.deps.getLocalRuntimeSummary());
+    const runtime = await this.deps.getLocalRuntimeSummary();
     const state = this.deps.getBridgeState();
     const stateLabel = state === 'remote'
       ? 'Remote Bridge'
       : (state === 'ready' ? 'Local Bridge Ready' : (state === 'starting' ? 'Auto-Start Enabled' : 'Local Bridge Stopped'));
-    const apiKeysUrl = escapeHtml(this.deps.getOsirusApiKeysUrl());
-    const setupSummary = escapeHtml(getProviderSetupSummary(runtimeProvider, authMode));
-    const baseUrlHint = escapeHtml(getProviderBaseUrlHint(runtimeProvider));
-    const activeOsirusOrgName = runtimeProvider === 'osirus' ? escapeHtml(await this.deps.getStoredOsirusActiveOrgName()) : '';
-    const activeOsirusOrgId = runtimeProvider === 'osirus' ? escapeHtml(await this.deps.getStoredOsirusActiveOrgId()) : '';
+    const setupSummary = getProviderSetupSummary(runtimeProvider, authMode);
+    const baseUrlHint = getProviderBaseUrlHint(runtimeProvider);
+    const activeOsirusOrgName = runtimeProvider === 'osirus' ? await this.deps.getStoredOsirusActiveOrgName() : '';
+    const activeOsirusOrgId = runtimeProvider === 'osirus' ? await this.deps.getStoredOsirusActiveOrgId() : '';
     const loginButtonLabel = runtimeProvider === 'osirus_agent'
       ? 'Login'
       : (runtimeProvider === 'osirus' ? 'Login with Osirus' : 'Configure');
@@ -222,30 +223,30 @@ export class ExtensionUiService {
       ? 'Welcome to Osirus Agent'
       : `Welcome to ${getProviderDisplayName(runtimeProvider)}`;
     const setupCopy = runtimeProvider === 'osirus_agent'
-      ? `Connect your Osirus account to start using Codex Bridge from VS Code. Login uses an API key. Need one first? Visit <a class="inline-link" href="${apiKeysUrl}" id="apiKeysLink">API Keys</a>.`
+      ? 'Connect your Osirus account to start using Codex Bridge from VS Code. Login uses an API key. Need one first? Visit API Keys.'
       : runtimeProvider === 'osirus'
-        ? `Sign in with your Osirus account to use the regular Osirus model catalog inside Codex Bridge while the bridge-side tool adapter is built out. Base URL: <span class="inline-code">${baseUrlHint}</span>.`
-        : `${setupSummary}${baseUrlHint ? ` Base URL: <span class="inline-code">${baseUrlHint}</span>.` : ''}`;
+        ? `Sign in with your Osirus account to use the regular Osirus model catalog inside Codex Bridge while the bridge-side tool adapter is built out. Base URL: ${baseUrlHint}.`
+        : `${setupSummary}${baseUrlHint ? ` Base URL: ${baseUrlHint}.` : ''}`;
     const authLabel = runtimeProvider === 'osirus' && signedIn ? 'osirus_account' : authMode;
 
-    return buildSidebarHtml({
+    return {
       activeOsirusOrgId,
       activeOsirusOrgName,
-      authLabel: escapeHtml(authLabel),
-      baseUrl,
-      loginButtonLabel: escapeHtml(loginButtonLabel),
+      authLabel,
+      baseUrl: this.deps.getBaseUrl(),
+      loginButtonLabel,
       provider,
       providerDisplayName,
       providerIcon,
-      readyCopy: escapeHtml(readyCopy),
+      readyCopy,
       runtime,
       runtimeProvider,
       setupCopy,
       signedIn,
-      signupButtonLabel: escapeHtml(signupButtonLabel),
+      signupButtonLabel,
       state,
-      stateLabel: escapeHtml(stateLabel),
-      welcomeTitle: escapeHtml(welcomeTitle),
-    });
+      stateLabel,
+      welcomeTitle,
+    };
   }
 }

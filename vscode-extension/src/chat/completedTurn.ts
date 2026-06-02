@@ -33,18 +33,10 @@ export function appendAssistantMessage(messages: LocalChatMessage[], assistantTe
 
 export function resolveCompletedLocalMessages(
   existingMessages: LocalChatMessage[],
-  mappedSessionMessages: LocalChatMessage[],
+  _mappedSessionMessages: LocalChatMessage[],
   assistantText: string
 ): LocalChatMessage[] {
-  if (hasTrailingAssistantMessage(mappedSessionMessages, assistantText)) {
-    return mappedSessionMessages;
-  }
-
-  const preferredBase = mappedSessionMessages.length >= existingMessages.length
-    ? mappedSessionMessages
-    : existingMessages;
-
-  return appendAssistantMessage(preferredBase, assistantText);
+  return appendAssistantMessage(existingMessages, assistantText);
 }
 
 export function resolveCompletedLocalMessagesFromStream(

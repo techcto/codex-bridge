@@ -16,7 +16,8 @@ export function sanitizeLocalChatMessage(
 ): LocalChatMessage | null {
   const role = options.normalizeRole(value?.role);
   const content = String(value?.content || '').trim();
-  if (!role || !content) {
+  const thinking = String(value?.thinking || '').trim();
+  if (!role || (!content && !thinking)) {
     return null;
   }
 
@@ -24,6 +25,7 @@ export function sanitizeLocalChatMessage(
     id: String(value?.id || options.createLocalId('msg')).trim(),
     role,
     content,
+    thinking: thinking || undefined,
     createdAt: Number(value?.createdAt || value?.created_at || Date.now()) || Date.now(),
   };
 }
@@ -89,21 +91,22 @@ export function mapBridgeSessionMessagesToLocal(
     normalizeRole: (value: unknown) => 'user' | 'assistant' | 'system' | null;
   }
 ): LocalChatMessage[] {
-  return (Array.isArray(messages) ? messages : [])
-    .map((message) => {
-      const role = options.normalizeRole(message?.role);
-      const content = String(message?.text || '').trim();
-      if (!role || !content) {
-        return null;
-      }
-      return {
-        id: options.createLocalId('msg'),
-        role,
-        content,
-        createdAt: Date.now(),
-      };
-    })
-    .filter((message: LocalChatMessage | null): message is LocalChatMessage => Boolean(message));
+  return (Array.isArray(messages) ? messages : []).reduce<LocalChatMessage[]>((acc, message) => {
+    const role = options.normalizeRole(message?.role);
+    const content = String(message?.text || '').trim();
+    const thinking = String(message?.thinking || '').trim();
+    if (!role || (!content && !thinking)) {
+      return acc;
+    }
+    acc.push({
+      id: options.createLocalId('msg'),
+      role,
+      content,
+      thinking: thinking || undefined,
+      createdAt: Date.now(),
+    });
+    return acc;
+  }, []);
 }
 
 export function mapOsirusHistoryToLocal(
@@ -114,6 +117,7 @@ export function mapOsirusHistoryToLocal(
     id: message.id || createLocalId('msg'),
     role: message.role,
     content: message.content,
+    thinking: undefined,
     createdAt: Date.now(),
   }));
 }

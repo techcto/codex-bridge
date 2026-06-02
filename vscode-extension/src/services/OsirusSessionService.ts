@@ -211,15 +211,17 @@ export class OsirusSessionService {
   }
 
   public async getSavedSelectedModelId(): Promise<string> {
-    return (await this.context.secrets.get(OSIRUS_SELECTED_MODEL_SECRET_KEY)) || '';
+    const scopedKey = await this.getSelectedModelSecretKey();
+    return (await this.context.secrets.get(scopedKey)) || '';
   }
 
   public async setSavedSelectedModelId(value: string): Promise<void> {
     const trimmed = value.trim();
+    const scopedKey = await this.getSelectedModelSecretKey();
     if (trimmed === '') {
-      await this.context.secrets.delete(OSIRUS_SELECTED_MODEL_SECRET_KEY);
+      await this.context.secrets.delete(scopedKey);
     } else {
-      await this.context.secrets.store(OSIRUS_SELECTED_MODEL_SECRET_KEY, trimmed);
+      await this.context.secrets.store(scopedKey, trimmed);
     }
   }
 
@@ -240,7 +242,36 @@ export class OsirusSessionService {
     promptUser?: boolean;
     tokenOverride?: string;
     preferredOrgId?: string | null;
+    validateServerActiveOrg?: boolean;
   }): Promise<{ orgId: string; orgName: string }> {
+    const storedOrgId = await this.getStoredActiveOrgId();
+    const storedOrgName = await this.getStoredActiveOrgName();
+    const preferredOrgId = String(options?.preferredOrgId || '').trim();
+    const validateServerActiveOrg = Boolean(options?.validateServerActiveOrg);
+
+    if (!options?.promptUser) {
+      const locallySelectedOrgId = preferredOrgId || storedOrgId;
+      if (!validateServerActiveOrg) {
+        if (preferredOrgId && preferredOrgId === storedOrgId) {
+          return { orgId: storedOrgId, orgName: storedOrgName };
+        }
+        if (!preferredOrgId && storedOrgId) {
+          return { orgId: storedOrgId, orgName: storedOrgName };
+        }
+      } else if (locallySelectedOrgId) {
+        const token = String(options?.tokenOverride || '').trim() || await this.getValidAccessToken();
+        const resolvedOrgId = await this.setActiveOrg(token, locallySelectedOrgId);
+        if (resolvedOrgId && resolvedOrgId !== storedOrgId) {
+          await this.setStoredActiveOrg(resolvedOrgId, storedOrgName || resolvedOrgId);
+        }
+        this.outputChannel?.appendLine(`[bridge] re-synced active Osirus org to ${resolvedOrgId || locallySelectedOrgId} before model load`);
+        return {
+          orgId: resolvedOrgId || locallySelectedOrgId,
+          orgName: storedOrgName || resolvedOrgId || locallySelectedOrgId,
+        };
+      }
+    }
+
     const token = String(options?.tokenOverride || '').trim() || await this.getValidAccessToken();
     const memberships = await this.fetchOrgMemberships(token);
     if (!memberships.length) {
@@ -249,8 +280,6 @@ export class OsirusSessionService {
     }
 
     const serverActiveOrgId = await this.getActiveOrgId(token);
-    const storedOrgId = await this.getStoredActiveOrgId();
-    const preferredOrgId = String(options?.preferredOrgId || '').trim();
 
     let selectedMembership: OsirusOrgMembership | undefined;
     if (memberships.length === 1) {
@@ -306,25 +335,7 @@ export class OsirusSessionService {
     if (accessToken === '') {
       throw new Error('No Osirus access token is available. Sign in first.');
     }
-
-    try {
-      await this.requestExternalJson(
-        'GET',
-        `${this.getAccountApiBaseUrl()}/auth/mobile/me`,
-        undefined,
-        {
-          'Authorization': `Bearer ${accessToken}`,
-        }
-      );
-      return accessToken;
-    } catch (error) {
-      const message = this.getErrorMessage(error).toLowerCase();
-      if (!message.includes('401') && !message.includes('403') && !message.includes('expired')) {
-        throw error;
-      }
-    }
-
-    return this.refreshAccessToken();
+    return accessToken;
   }
 
   public async requestJsonWithToken<T>(
@@ -529,6 +540,14 @@ export class OsirusSessionService {
   private async clearCredentials(): Promise<void> {
     await this.context.secrets.delete(OSIRUS_EMAIL_SECRET_KEY);
     await this.context.secrets.delete(OSIRUS_PASSWORD_SECRET_KEY);
+  }
+
+  private async getSelectedModelSecretKey(): Promise<string> {
+    const activeOrgId = await this.getStoredActiveOrgId();
+    const normalizedOrgId = String(activeOrgId || '').trim();
+    return normalizedOrgId
+      ? `${OSIRUS_SELECTED_MODEL_SECRET_KEY}.${normalizedOrgId}`
+      : OSIRUS_SELECTED_MODEL_SECRET_KEY;
   }
 
   private async setAuthTokens(tokens: { accessToken: string; refreshToken: string }): Promise<void> {

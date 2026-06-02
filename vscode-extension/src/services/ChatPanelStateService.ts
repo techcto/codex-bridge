@@ -36,6 +36,7 @@ export type ChatPanelStateServiceDeps = {
   preferOsirusProductOption: (selected: OsirusModelOption, options: OsirusModelOption[]) => OsirusModelOption;
   runtimeProvider: () => RuntimeProvider;
   setActiveThreadIdForProvider: (provider: RuntimeProvider, threadId?: string) => Promise<void>;
+  setStoredOpenOsirusChatId: (chatId?: string) => Promise<void>;
   updateStoredThreadMessages: (
     threadId: string,
     messages: LocalChatMessage[],
@@ -46,6 +47,12 @@ export type ChatPanelStateServiceDeps = {
 export class ChatPanelStateService {
   private readonly deps: ChatPanelStateServiceDeps;
   private inFlightBuildState: Promise<Record<string, unknown>> | null = null;
+  private cachedOsirusModels:
+    | {
+      orgId: string;
+      options: OsirusModelOption[];
+    }
+    | null = null;
 
   public constructor(deps: ChatPanelStateServiceDeps) {
     this.deps = deps;
@@ -78,8 +85,10 @@ export class ChatPanelStateService {
     const activeThread = await this.deps.getOrCreateActiveThread(runtimeProvider);
     let refreshedThread = activeThread;
     let osirusModels: OsirusModelOption[] = [];
-    let selectedOsirusModelId = activeThread.selectedModelId || '';
+    let selectedOsirusModelId = '';
     const storedOpenOsirusChatId = runtimeProvider === 'osirus' ? await this.deps.getStoredOpenOsirusChatId() : '';
+    let storedActiveOrgId = runtimeProvider === 'osirus' ? await this.deps.getStoredOsirusActiveOrgId() : '';
+    let storedActiveOrgName = runtimeProvider === 'osirus' ? await this.deps.getStoredOsirusActiveOrgName() : '';
 
     if (runtimeProvider === 'osirus' && storedOpenOsirusChatId && storedOpenOsirusChatId !== String(refreshedThread.osirusChatId || '')) {
       const matchingThread = providerThreads.find((thread) => String(thread.osirusChatId || '') === storedOpenOsirusChatId);
@@ -87,23 +96,32 @@ export class ChatPanelStateService {
         refreshedThread = matchingThread;
         await this.deps.setActiveThreadIdForProvider(runtimeProvider, matchingThread.id);
       } else {
-        refreshedThread = await this.deps.createLocalChatThread(runtimeProvider, {
-          osirusChatId: storedOpenOsirusChatId,
-          workspaceFingerprint: scopeKey,
-        });
+        this.deps.outputChannel?.appendLine(`[bridge] ignoring stale stored open Osirus chat id ${storedOpenOsirusChatId}; no local thread matched`);
+        await this.deps.setStoredOpenOsirusChatId(undefined);
       }
     }
 
-    if (runtimeProvider === 'osirus' && await this.deps.hasOsirusAccountSession()) {
+    const hasOsirusSession = runtimeProvider === 'osirus' && await this.deps.hasOsirusAccountSession();
+    if (!hasOsirusSession) {
+      this.cachedOsirusModels = null;
+    }
+
+    if (runtimeProvider === 'osirus' && hasOsirusSession) {
       try {
-        osirusModels = await this.deps.fetchOsirusModelOptions();
-        this.deps.outputChannel?.appendLine(`[bridge] chat state fetched osirus models=${osirusModels.length}`);
-        selectedOsirusModelId = selectedOsirusModelId || await this.deps.getSavedOsirusSelectedModelId();
-        if (!osirusModels.some((option) => option.id === selectedOsirusModelId)) {
-          selectedOsirusModelId = osirusModels[0]?.id || '';
-        }
-        if (selectedOsirusModelId && selectedOsirusModelId !== activeThread.selectedModelId) {
-          refreshedThread = await this.deps.updateStoredThreadMessages(activeThread.id, activeThread.messages, {
+        osirusModels = await this.getCachedOsirusModels(storedActiveOrgId);
+        this.deps.outputChannel?.appendLine(`[bridge] chat state resolved osirus models=${osirusModels.length}`);
+        storedActiveOrgId = await this.deps.getStoredOsirusActiveOrgId();
+        storedActiveOrgName = await this.deps.getStoredOsirusActiveOrgName();
+        const savedSelectedModelId = String(await this.deps.getSavedOsirusSelectedModelId() || '').trim();
+        const threadSelectedModelId = String(refreshedThread.selectedModelId || '').trim();
+        selectedOsirusModelId =
+          [savedSelectedModelId, threadSelectedModelId].find((candidateId) =>
+            candidateId && osirusModels.some((option) => option.id === candidateId)
+          )
+          || osirusModels[0]?.id
+          || '';
+        if (selectedOsirusModelId && selectedOsirusModelId !== refreshedThread.selectedModelId) {
+          refreshedThread = await this.deps.updateStoredThreadMessages(refreshedThread.id, refreshedThread.messages, {
             selectedModelId: selectedOsirusModelId,
           });
         }
@@ -113,7 +131,26 @@ export class ChatPanelStateService {
           });
         }
         if (refreshedThread.osirusChatId) {
-          const snapshot = await this.deps.fetchOsirusChatSnapshot(refreshedThread.osirusChatId);
+          let snapshot: OsirusChatSnapshot | null = null;
+          try {
+            snapshot = await this.deps.fetchOsirusChatSnapshot(refreshedThread.osirusChatId);
+          } catch (error) {
+            const errorMessage = this.deps.getErrorMessage(error);
+            if (/404/.test(errorMessage)) {
+              this.deps.outputChannel?.appendLine(`[bridge] clearing stale Osirus chat id ${refreshedThread.osirusChatId} after 404`);
+              await this.deps.setStoredOpenOsirusChatId(undefined);
+              refreshedThread = await this.deps.updateStoredThreadMessages(
+                refreshedThread.id,
+                refreshedThread.messages,
+                {
+                  osirusChatId: undefined,
+                }
+              );
+            } else {
+              throw error;
+            }
+          }
+          if (snapshot) {
           const resolvedHistoryModelId = resolveSelectedOsirusModelIdFromHistory(
             snapshot.messages,
             osirusModels,
@@ -135,6 +172,7 @@ export class ChatPanelStateService {
           );
           if (resolvedHistoryModelId) {
             selectedOsirusModelId = resolvedHistoryModelId;
+          }
           }
         }
       } catch (error) {
@@ -175,8 +213,8 @@ export class ChatPanelStateService {
       })),
       messages: refreshedThread.messages,
       context: this.buildUiContext(this.deps.buildChatContext({ includeContent: false })),
-      activeOrgName: runtimeProvider === 'osirus' ? await this.deps.getStoredOsirusActiveOrgName() : '',
-      activeOrgId: runtimeProvider === 'osirus' ? await this.deps.getStoredOsirusActiveOrgId() : '',
+      activeOrgName: storedActiveOrgName,
+      activeOrgId: storedActiveOrgId,
     };
 
     this.deps.outputChannel?.appendLine(`[bridge] chat state build done threads=${state.threads.length} models=${state.osirusModels.length} selected=${state.selectedOsirusModelId || '(none)'}`);
@@ -217,6 +255,21 @@ export class ChatPanelStateService {
         };
       }),
     };
+  }
+
+  private async getCachedOsirusModels(orgIdHint: string): Promise<OsirusModelOption[]> {
+    const cacheKey = String(orgIdHint || '').trim();
+    if (cacheKey && this.cachedOsirusModels?.orgId === cacheKey) {
+      return this.cachedOsirusModels.options;
+    }
+
+    const options = await this.deps.fetchOsirusModelOptions();
+    const resolvedOrgId = String(await this.deps.getStoredOsirusActiveOrgId() || cacheKey || 'default').trim();
+    this.cachedOsirusModels = {
+      orgId: resolvedOrgId,
+      options,
+    };
+    return options;
   }
 
   private formatThreadTime(value: number): string {

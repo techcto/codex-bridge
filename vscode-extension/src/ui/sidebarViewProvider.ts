@@ -1,8 +1,11 @@
 import * as vscode from 'vscode';
+import { ChatPanelController } from '../controllers/ChatPanelController';
 
 export type SidebarProviderDeps = {
+  buildState: () => Promise<Record<string, unknown>>;
   checkHealth: () => Promise<void>;
   configureConnection: () => Promise<void>;
+  controller: ChatPanelController;
   getCurrentRuntimeProvider: () => string;
   getOsirusApiKeysUrl: () => string;
   getOsirusSignupUrl: () => string;
@@ -10,10 +13,10 @@ export type SidebarProviderDeps = {
   loginToOsirusAccount: () => Promise<void>;
   logoutFromOsirus: () => Promise<void>;
   logoutFromOsirusAccount: () => Promise<void>;
-  openChat: () => Promise<void>;
   openExternal: (uri: vscode.Uri) => Thenable<boolean>;
+  outputChannel?: { appendLine(value: string): void };
   refreshOpenOsirusChatState: () => Promise<void>;
-  renderHtml: () => Promise<string>;
+  renderHtml: () => string;
   setProviderApiKey: (value: string) => Promise<void>;
   showInfo: (message: string) => Thenable<string | undefined>;
   showLogs: () => void;
@@ -22,6 +25,8 @@ export type SidebarProviderDeps = {
 
 export class CodexBridgeSidebarProvider implements vscode.WebviewViewProvider {
   private view?: vscode.WebviewView;
+  private isReady = false;
+  private pendingStatePayload: Record<string, unknown> | undefined;
 
   constructor(private readonly deps: SidebarProviderDeps) {}
 
@@ -32,65 +37,105 @@ export class CodexBridgeSidebarProvider implements vscode.WebviewViewProvider {
     };
 
     webviewView.webview.onDidReceiveMessage(async (message) => {
-      switch (message?.type) {
-        case 'openChat':
-          await this.deps.openChat();
-          break;
-        case 'configure':
-          await this.deps.configureConnection();
-          break;
-        case 'health':
-          await this.deps.checkHealth();
-          break;
-        case 'logs':
-          this.deps.showLogs();
-          break;
-        case 'login':
-          if (this.deps.getCurrentRuntimeProvider() === 'osirus_agent') {
-            await this.deps.loginToOsirus();
-          } else if (this.deps.getCurrentRuntimeProvider() === 'osirus') {
-            await this.deps.loginToOsirusAccount();
-          } else {
+      try {
+        switch (message?.type) {
+          case 'clientError':
+            this.deps.outputChannel?.appendLine(`[bridge] sidebar client error: ${String(message?.value || 'Unknown sidebar client error')}`);
+            break;
+          case 'clientLog':
+            this.deps.outputChannel?.appendLine(`[bridge] sidebar webview: ${String(message?.value || '')}`);
+            break;
+          case 'configure':
             await this.deps.configureConnection();
-          }
-          break;
-        case 'logout':
-          if (this.deps.getCurrentRuntimeProvider() === 'osirus_agent') {
-            await this.deps.logoutFromOsirus();
-          } else if (this.deps.getCurrentRuntimeProvider() === 'osirus') {
-            await this.deps.logoutFromOsirusAccount();
-          } else {
-            await this.deps.setProviderApiKey('');
-            await this.deps.showInfo('Provider API key cleared for this extension.');
             await this.refresh();
-          }
-          break;
-        case 'switchOrg':
-          if (this.deps.getCurrentRuntimeProvider() === 'osirus') {
-            const resolved = await this.deps.switchOsirusOrg();
-            await this.deps.refreshOpenOsirusChatState();
-            await this.deps.showInfo(`Switched Osirus organization to ${resolved.orgName}.`);
-          }
-          break;
-        case 'signup':
-          if (this.deps.getCurrentRuntimeProvider() === 'osirus_agent' || this.deps.getCurrentRuntimeProvider() === 'osirus') {
-            await this.deps.openExternal(vscode.Uri.parse(this.deps.getOsirusSignupUrl()));
-          } else {
-            await this.deps.configureConnection();
-          }
-          break;
-        case 'apiKeys':
-          if (this.deps.getCurrentRuntimeProvider() === 'osirus_agent') {
-            await this.deps.openExternal(vscode.Uri.parse(this.deps.getOsirusApiKeysUrl()));
-          } else {
-            await this.deps.configureConnection();
-          }
-          break;
-        default:
-          break;
+            break;
+          case 'health':
+            await this.deps.checkHealth();
+            break;
+          case 'logs':
+            this.deps.showLogs();
+            break;
+          case 'login':
+            if (this.deps.getCurrentRuntimeProvider() === 'osirus_agent') {
+              await this.deps.loginToOsirus();
+            } else if (this.deps.getCurrentRuntimeProvider() === 'osirus') {
+              await this.deps.loginToOsirusAccount();
+            } else {
+              await this.deps.configureConnection();
+            }
+            await this.refresh();
+            break;
+          case 'logout':
+            if (this.deps.getCurrentRuntimeProvider() === 'osirus_agent') {
+              await this.deps.logoutFromOsirus();
+            } else if (this.deps.getCurrentRuntimeProvider() === 'osirus') {
+              await this.deps.logoutFromOsirusAccount();
+            } else {
+              await this.deps.setProviderApiKey('');
+              await this.deps.showInfo('Provider API key cleared for this extension.');
+            }
+            await this.refresh();
+            break;
+          case 'switchOrg':
+            if (this.deps.getCurrentRuntimeProvider() === 'osirus') {
+              const resolved = await this.deps.switchOsirusOrg();
+              await this.deps.refreshOpenOsirusChatState();
+              await this.deps.showInfo(`Switched Osirus organization to ${resolved.orgName}.`);
+            }
+            await this.refresh();
+            break;
+          case 'signup':
+            if (this.deps.getCurrentRuntimeProvider() === 'osirus_agent' || this.deps.getCurrentRuntimeProvider() === 'osirus') {
+              await this.deps.openExternal(vscode.Uri.parse(this.deps.getOsirusSignupUrl()));
+            } else {
+              await this.deps.configureConnection();
+              await this.refresh();
+            }
+            break;
+          case 'apiKeys':
+            if (this.deps.getCurrentRuntimeProvider() === 'osirus_agent') {
+              await this.deps.openExternal(vscode.Uri.parse(this.deps.getOsirusApiKeysUrl()));
+            } else {
+              await this.deps.configureConnection();
+            }
+            break;
+          case 'openFile':
+            await this.openFileInEditor(String(message.path || ''), Number(message.line || 0));
+            break;
+          case 'openLink':
+            if (message.url) {
+              await this.deps.openExternal(vscode.Uri.parse(String(message.url)));
+            }
+            break;
+          case 'ready':
+            this.isReady = true;
+            if (this.pendingStatePayload) {
+              await this.deliverState(this.pendingStatePayload);
+            } else {
+              await this.refresh();
+            }
+            break;
+          default:
+            if (!this.view) {
+              return;
+            }
+            await this.deps.controller.handleMessage(this.view, message, async () => {
+              await this.refresh();
+            });
+            break;
+        }
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        this.deps.outputChannel?.appendLine(`[bridge] sidebar action failed: ${detail}`);
+        void vscode.window.showErrorMessage(detail);
+        if (this.view) {
+          void this.view.webview.postMessage({ type: 'error', value: detail });
+        }
       }
     });
 
+    webviewView.webview.html = this.deps.renderHtml();
+    this.isReady = false;
     void this.refresh();
   }
 
@@ -100,11 +145,67 @@ export class CodexBridgeSidebarProvider implements vscode.WebviewViewProvider {
     }
 
     try {
-      this.view.webview.html = await this.deps.renderHtml();
+      await this.pushState(await this.deps.buildState());
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
       this.view.webview.html = this.renderErrorHtml(detail);
+      this.isReady = false;
     }
+  }
+
+  async pushState(payload: Record<string, unknown>): Promise<void> {
+    this.pendingStatePayload = payload;
+    await this.deliverState(payload);
+  }
+
+  focus(): void {
+    if (this.view) {
+      this.view.show(false);
+      return;
+    }
+    void vscode.commands.executeCommand('codexBridge.sidebar.focus');
+  }
+
+  private async deliverState(payload: Record<string, unknown>): Promise<void> {
+    if (!this.view || !this.isReady) {
+      return;
+    }
+    await this.view.webview.postMessage({
+      type: 'state',
+      payload,
+    });
+  }
+
+  private async openFileInEditor(rawPath: string, line: number): Promise<void> {
+    const normalized = rawPath.trim();
+    if (!normalized) {
+      return;
+    }
+
+    const path = this.resolveWorkspacePath(normalized);
+    const document = await vscode.workspace.openTextDocument(vscode.Uri.file(path));
+    const editor = await vscode.window.showTextDocument(document, { preview: false });
+    const targetLine = Math.max(0, Number.isFinite(line) ? line - 1 : 0);
+    const position = new vscode.Position(targetLine, 0);
+    editor.selection = new vscode.Selection(position, position);
+    editor.revealRange(new vscode.Range(position, position), vscode.TextEditorRevealType.InCenter);
+  }
+
+  private resolveWorkspacePath(rawPath: string): string {
+    if (/^file:\/\//i.test(rawPath)) {
+      return vscode.Uri.parse(rawPath).fsPath;
+    }
+
+    if (/^[A-Za-z]:[\\/]/.test(rawPath) || rawPath.startsWith('/') || rawPath.startsWith('\\\\')) {
+      return rawPath;
+    }
+
+    const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    if (!workspaceRoot) {
+      return rawPath;
+    }
+
+    return vscode.Uri.joinPath(vscode.Uri.file(workspaceRoot), rawPath).fsPath;
   }
 
   private renderErrorHtml(detail: string): string {
