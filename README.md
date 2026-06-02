@@ -110,6 +110,19 @@ The planned local-first tool protocol covers bridge-executed actions such as:
 - `git_diff`
 - `apply_patch`
 
+### Bridge-Side Tool Adapter Notes
+
+The `bridge_tools` path now includes a local planner/executor loop for models that do not emit native Codex tool calls. This adapter keeps workspace actions grounded in verified tool results instead of trusting model narration.
+
+Important behavior:
+
+- `rg`/ripgrep is optional. The bridge uses it when available for fast file and text search, then falls back to bounded Node filesystem traversal when it is missing from `PATH`.
+- The planner receives VS Code active editor and open-tab context. If a model invents placeholder paths such as `file.md` while the user is referring to the visible/current editor, the bridge rewrites the path to the active editor file before execution.
+- `insert_in_file` supports precise placement by `line_number`, with `line`, `lineNumber`, `position`, and `anchor_text` aliases. A plain `line_number: 3` inserts before line 3; `position: "after"` inserts after that line.
+- If both `line_number` and `anchor_text` are provided, the anchor is matched only on that line. This handles requests such as “insert after `GPUWire is a marketplace` on line 5.”
+- Failed mutating tools cannot be followed by a success-sounding final answer unless the failure is acknowledged. This prevents “edit succeeded” messages after a rejected or invalid tool call.
+- Stale Osirus chat IDs are cleared from local thread state after remote 404s, so deleted remote chats do not keep getting rehydrated.
+
 ## Running Locally
 
 Fastest direct bridge run:

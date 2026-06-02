@@ -158,8 +158,14 @@ export class LocalThreadStore {
     }
 
     const lastMessageText = messages[messages.length - 1]?.content || '';
-    const title = options?.title || deriveThreadTitle(thread.messages[0]?.content || messages[0]?.content || thread.title);
-    const summary = options?.summary || summarizeThreadFromMessages(messages) || thread.summary || lastMessageText;
+    const hasOption = (key: keyof Pick<LocalChatThread, 'title' | 'summary' | 'sessionId' | 'osirusChatId' | 'selectedModelId'>): boolean =>
+      Boolean(options && Object.prototype.hasOwnProperty.call(options, key));
+    const title = hasOption('title') && options?.title
+      ? options.title
+      : deriveThreadTitle(thread.messages[0]?.content || messages[0]?.content || thread.title);
+    const summary = hasOption('summary') && options?.summary
+      ? options.summary
+      : summarizeThreadFromMessages(messages) || thread.summary || lastMessageText;
     const nextThread: LocalChatThread = {
       ...thread,
       title,
@@ -171,9 +177,9 @@ export class LocalThreadStore {
         }))
         .filter((message): message is LocalChatMessage => Boolean(message)),
       updatedAt: Date.now(),
-      sessionId: options?.sessionId !== undefined ? options.sessionId : thread.sessionId,
-      osirusChatId: options?.osirusChatId !== undefined ? options.osirusChatId : thread.osirusChatId,
-      selectedModelId: options?.selectedModelId !== undefined ? options.selectedModelId : thread.selectedModelId,
+      sessionId: hasOption('sessionId') ? options?.sessionId : thread.sessionId,
+      osirusChatId: hasOption('osirusChatId') ? options?.osirusChatId : thread.osirusChatId,
+      selectedModelId: hasOption('selectedModelId') ? options?.selectedModelId : thread.selectedModelId,
     };
 
     return this.upsertStoredChatThread(nextThread);

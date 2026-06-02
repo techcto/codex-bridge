@@ -6,6 +6,7 @@ import { cleanupTempFiles, materializeImageAttachments } from './attachments.mjs
 import { writeSse } from './http.mjs';
 import { normalizeAgentRuntimeContext } from './agent-capabilities.mjs';
 import { LocalToolExecutor, summarizeLocalToolProtocol } from './local-tools.mjs';
+import { summarizeContext } from './prompt.mjs';
 
 export class ChatSessionService {
   constructor(deps) {
@@ -789,6 +790,8 @@ export class ChatSessionService {
 
   buildBridgeToolPlannerPrompt({ session, message, toolExecutor, toolHistory = [] }) {
     const toolList = summarizeLocalToolProtocol();
+    const activeFile = this.getContextActiveFile(session);
+    const contextSummary = summarizeContext(session?.context || {});
     const conversation = (Array.isArray(session.messages) ? session.messages : [])
       .slice(-8)
       .map((entry) => `${String(entry.role || 'assistant').toUpperCase()}:\n${String(entry.text || '').trim()}`)
@@ -818,7 +821,8 @@ export class ChatSessionService {
       '- Use write_file to replace full file contents when needed.',
       '- Use append_file to add content to the end of a file.',
       '- Use replace_in_file for precise local edits, but only after you know the exact old_text currently in the file.',
-      '- Use insert_in_file when you need to place new text around an existing anchor, or at position start/end, without rewriting the whole file.',
+      '- Use insert_in_file when you need to place new text around an existing anchor, at a specific line_number, or at position start/end, without rewriting the whole file.',
+      '- If the user says after/before specific text on a specific line, pass both line_number and anchor_text with position before/after so the anchor is matched only on that line.',
       '- Use create_directory before writing into a new folder.',
       '- Use move_file, copy_file, and delete_file for actual filesystem operations instead of simulating them with edits.',
       '- Use apply_patch only when a unified diff is the clearest representation.',
@@ -829,6 +833,9 @@ export class ChatSessionService {
       '- To inspect a specific commit or learn which files changed in a commit, prefer git_show or git_diff with a specific revspec/commit instead of a full workspace diff.',
       '- If the user asks which files a commit changed, prefer a name-only or summary-style git inspection before requesting a full patch.',
       '- If an edit tool fails because required input is missing or the target text is not found, inspect the file and try again with a better tool input.',
+      activeFile?.path ? `Active editor target file: ${activeFile.path}` : '',
+      contextSummary ? `Workspace/VS Code context:\n${contextSummary}` : '',
+      '- If the user references the visible/current/editor file or pastes editor contents without naming a path, use the Active editor target file. Do not invent placeholder paths like file.md.',
       'Current conversation:',
       conversation || `USER:\n${message}`,
       'Current turn tool transcript:',
@@ -863,6 +870,128 @@ export class ChatSessionService {
     return /\b(failed|could(?: not|n't)|unable|not able|did(?: not|n't)|was(?: not|n't)|error|denied|not applied|not changed|no changes|requires|missing)\b/i.test(
       String(response || ''),
     );
+  }
+
+  extractRequestedInsertLineTarget(session, message = '') {
+    const userTexts = [
+      String(message || ''),
+      ...(Array.isArray(session?.messages) ? [...session.messages].reverse()
+        .filter((entry) => String(entry?.role || '').toLowerCase() === 'user')
+        .map((entry) => String(entry?.text || '')) : []),
+    ];
+
+    const ordinalWords = new Map([
+      ['first', 1],
+      ['second', 2],
+      ['third', 3],
+      ['fourth', 4],
+      ['fifth', 5],
+      ['sixth', 6],
+      ['seventh', 7],
+      ['eighth', 8],
+      ['ninth', 9],
+      ['tenth', 10],
+    ]);
+
+    for (const text of userTexts) {
+      const value = String(text || '').trim();
+      if (!value) {
+        continue;
+      }
+
+      const numericMatch = value.match(/\b(?:line|line\s*number|line\s*#|#)\s*#?\s*(\d+)\b/i);
+      const ordinalMatch = value.match(/\b(first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth)\s+line\b/i);
+      const lineNumber = numericMatch
+        ? Number.parseInt(numericMatch[1], 10)
+        : (ordinalMatch ? ordinalWords.get(String(ordinalMatch[1] || '').toLowerCase()) : 0);
+      if (!lineNumber || lineNumber < 1) {
+        continue;
+      }
+
+      const lowered = value.toLowerCase();
+      const beforeLineNeedle = numericMatch ? numericMatch[0].toLowerCase() : String(ordinalMatch?.[0] || '').toLowerCase();
+      const lineIndex = beforeLineNeedle ? lowered.indexOf(beforeLineNeedle) : -1;
+      const prefix = lineIndex >= 0 ? lowered.slice(Math.max(0, lineIndex - 32), lineIndex) : lowered;
+      const fullPrefix = lineIndex >= 0 ? lowered.slice(0, lineIndex) : lowered;
+      const lastAfter = fullPrefix.lastIndexOf('after');
+      const lastBefore = fullPrefix.lastIndexOf('before');
+      const explicitAfter = lastAfter > lastBefore || /\bafter\s+(?:the\s+)?$/.test(prefix) || /\bafter\s+(?:line|line\s*number|line\s*#|#)\s*#?\s*\d+\b/i.test(value);
+      return {
+        lineNumber,
+        position: explicitAfter ? 'after' : 'before',
+      };
+    }
+
+    return null;
+  }
+
+  normalizeLineTargetedInsertInput(toolName, input = {}, lineTarget = null) {
+    if (String(toolName || '').trim() !== 'insert_in_file' || !lineTarget?.lineNumber) {
+      return input && typeof input === 'object' ? input : {};
+    }
+
+    return {
+      ...(input && typeof input === 'object' ? input : {}),
+      line_number: lineTarget.lineNumber,
+      position: lineTarget.position,
+    };
+  }
+
+  normalizeContextualPathInput(session, message = '', toolName = '', input = {}) {
+    const normalizedToolName = String(toolName || '').trim();
+    const pathTools = new Set([
+      'read_file',
+      'search_text',
+      'insert_in_file',
+      'replace_in_file',
+      'append_file',
+      'stat_file',
+      'path_exists',
+    ]);
+    if (!pathTools.has(normalizedToolName)) {
+      return input && typeof input === 'object' ? input : {};
+    }
+
+    const record = input && typeof input === 'object' ? input : {};
+    const requestedPath = String(record.path || '').trim();
+    const activeFile = this.getContextActiveFile(session);
+    if (!activeFile?.path) {
+      return record;
+    }
+
+    const userText = String(message || '').toLowerCase();
+    const placeholderPath = /^(?:file|current-file|current_file|active-file|active_file|document|doc|untitled)(?:\.[a-z0-9_-]+)?$/i.test(requestedPath);
+    const currentFileRequest = /\b(current|active|open|visible|editor|this)\b/.test(userText) || userText.includes('# ');
+    if ((!requestedPath || placeholderPath) && currentFileRequest) {
+      return {
+        ...record,
+        path: activeFile.path,
+      };
+    }
+
+    return record;
+  }
+
+  getMismatchedLineTargetedInsert(toolHistory = [], lineTarget = null) {
+    if (!lineTarget?.lineNumber) {
+      return null;
+    }
+
+    for (let index = toolHistory.length - 1; index >= 0; index -= 1) {
+      const step = toolHistory[index] || {};
+      if (String(step.tool || '').trim() !== 'insert_in_file' || step.result?.ok !== true) {
+        continue;
+      }
+
+      const resultLine = Number.parseInt(String(step.result?.line_number || ''), 10) || 0;
+      const resultPosition = String(step.result?.position || '').trim().toLowerCase();
+      if (resultLine !== lineTarget.lineNumber || (resultPosition && resultPosition !== lineTarget.position)) {
+        return step;
+      }
+      return null;
+    }
+
+    return null;
   }
 
   validateBridgeToolInput(toolName, input = {}) {
@@ -900,20 +1029,26 @@ export class ChatSessionService {
     }
 
     if (normalizedToolName === 'insert_in_file') {
-      const rawPosition = String(record.position || record.location || '').trim().toLowerCase();
+      const hasExplicitPosition = Object.prototype.hasOwnProperty.call(record, 'position')
+        || Object.prototype.hasOwnProperty.call(record, 'location');
+      const rawAnchorHint = String(record.anchor || record.anchorText || record.search_text || '').trim().toLowerCase();
+      const rawPosition = String(
+        record.position
+        || record.location
+        || (!Object.prototype.hasOwnProperty.call(record, 'anchor_text') && ['start', 'beginning', 'top', 'end', 'bottom'].includes(rawAnchorHint) ? rawAnchorHint : '')
+      ).trim().toLowerCase();
       const insertsAtBoundary = ['start', 'beginning', 'top', 'end', 'bottom'].includes(rawPosition);
+      const lineNumber = Number.parseInt(String(record.line_number || record.lineNumber || record.line || ''), 10) || 0;
       const anchorText = String(
         record.anchor_text
-        || record.anchorText
-        || record.anchor
-        || record.search_text
+        || (hasExplicitPosition ? (record.anchorText || record.anchor || record.search_text) : (!insertsAtBoundary ? (record.anchorText || record.anchor || record.search_text) : ''))
         || '',
       );
       if (!String(record.path || '').trim()) {
         return 'insert_in_file requires a path.';
       }
-      if (!anchorText && !insertsAtBoundary) {
-        return 'insert_in_file requires anchor_text (or anchorText, anchor, search_text) unless position is start or end.';
+      if (!anchorText && !insertsAtBoundary && lineNumber <= 0) {
+        return 'insert_in_file requires anchor_text (or anchorText, anchor, search_text), line_number, or position start/end.';
       }
       if (!Object.prototype.hasOwnProperty.call(record, 'text')) {
         return 'insert_in_file requires text.';
@@ -1121,6 +1256,7 @@ export class ChatSessionService {
 
     const toolHistory = [];
     const maxSteps = 10;
+    const requestedInsertLineTarget = this.extractRequestedInsertLineTarget(session, message);
 
     try {
       this.logPlanner(session, `start message=${JSON.stringify(this.summarizePlannerText(message, 160))}`);
@@ -1184,6 +1320,22 @@ export class ChatSessionService {
             });
             continue;
           }
+          const mismatchedLineInsert = this.getMismatchedLineTargetedInsert(toolHistory, requestedInsertLineTarget);
+          if (mismatchedLineInsert && !this.finalResponseAcknowledgesToolFailure(decision.response)) {
+            const guardError = `Cannot claim success because insert_in_file wrote line ${mismatchedLineInsert.result?.line_number || '(unknown)'} ${mismatchedLineInsert.result?.position || ''}, but the user requested line ${requestedInsertLineTarget.lineNumber} ${requestedInsertLineTarget.position}.`;
+            this.logPlanner(session, `step=${step + 1} final=rejected_after_line_mismatch error=${JSON.stringify(this.summarizePlannerText(guardError))}`);
+            toolHistory.push({
+              tool: 'planner_final_guard',
+              input: {
+                rejected_response: decision.response || '',
+              },
+              result: {
+                ok: false,
+                error: guardError,
+              },
+            });
+            continue;
+          }
           const finalMessage = this.splitReasoningContent(decision.response || 'No response returned.');
           session.messages.push({
             id: randomUUID(),
@@ -1204,6 +1356,9 @@ export class ChatSessionService {
         if (!decision.tool) {
           throw new Error('Planner requested a tool step without naming a tool.');
         }
+
+        decision.input = this.normalizeContextualPathInput(session, message, decision.tool, decision.input || {});
+        decision.input = this.normalizeLineTargetedInsertInput(decision.tool, decision.input || {}, requestedInsertLineTarget);
 
         this.logPlanner(
           session,

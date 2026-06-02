@@ -86,7 +86,7 @@ export const LOCAL_TOOL_DEFINITIONS = [
   },
   {
     name: 'insert_in_file',
-    description: 'Insert text before or after an anchor string, or at the start/end of a workspace file.',
+    description: 'Insert text before or after an anchor string, at a line number, or at the start/end of a workspace file.',
     input_schema: {
       type: 'object',
       properties: {
@@ -95,9 +95,12 @@ export const LOCAL_TOOL_DEFINITIONS = [
         anchorText: { type: 'string' },
         anchor: { type: 'string' },
         search_text: { type: 'string' },
+        line_number: { type: 'integer' },
+        lineNumber: { type: 'integer' },
+        line: { type: 'integer' },
         text: { type: 'string' },
-        position: { type: 'string', enum: ['before', 'after', 'start', 'end', 'beginning'] },
-        location: { type: 'string', enum: ['start', 'end', 'beginning'] },
+        position: { type: 'string', enum: ['before', 'after', 'start', 'end', 'beginning', 'top', 'bottom'] },
+        location: { type: 'string', enum: ['start', 'end', 'beginning', 'top', 'bottom'] },
         occurrence: { type: 'string', enum: ['first', 'last'] },
       },
       required: ['path', 'text'],
@@ -419,6 +422,52 @@ function getLineNumberFromOffset(text = '', offset = 0) {
   return String(text || '').slice(0, safeOffset).split('\n').length;
 }
 
+function getLineOffset(text = '', lineNumber = 1, position = 'before') {
+  const targetLine = Math.max(1, Number.parseInt(String(lineNumber || ''), 10) || 1);
+  const rawText = String(text || '');
+  const normalizedPosition = String(position || '').trim().toLowerCase() === 'after' ? 'after' : 'before';
+  let currentLine = 1;
+
+  if (targetLine === 1 && normalizedPosition === 'before') {
+    return 0;
+  }
+
+  for (let index = 0; index < rawText.length; index += 1) {
+    if (rawText[index] !== '\n') {
+      continue;
+    }
+
+    if (normalizedPosition === 'after' && currentLine === targetLine) {
+      return index + 1;
+    }
+
+    currentLine += 1;
+    if (normalizedPosition === 'before' && currentLine === targetLine) {
+      return index + 1;
+    }
+  }
+
+  if (normalizedPosition === 'after' && currentLine === targetLine) {
+    return rawText.length;
+  }
+  if (normalizedPosition === 'before' && currentLine + 1 === targetLine) {
+    return rawText.length;
+  }
+
+  throw new Error(`insert_in_file line_number ${targetLine} is outside the file range.`);
+}
+
+function getLineRange(text = '', lineNumber = 1) {
+  const rawText = String(text || '');
+  const start = getLineOffset(rawText, lineNumber, 'before');
+  const end = getLineOffset(rawText, lineNumber, 'after');
+  return {
+    start,
+    end,
+    text: rawText.slice(start, end).replace(/\n$/, ''),
+  };
+}
+
 function normalizeLookupName(value = '') {
   return String(value || '').toLowerCase().replace(/[^a-z0-9]/g, '');
 }
@@ -472,6 +521,9 @@ function buildCommitUrl(remoteUrl = '', commitSha = '') {
 
 const DEFAULT_LIST_FILES_LIMIT = 1000;
 const MAX_LIST_FILES_LIMIT = 5000;
+const DEFAULT_SEARCH_TEXT_FILE_LIMIT = 1000;
+const DEFAULT_SEARCH_TEXT_MATCH_LIMIT = 200;
+const MAX_SEARCH_TEXT_FILE_BYTES = 2 * 1024 * 1024;
 const LIST_FILES_SKIPPED_DIRECTORIES = new Set([
   '.git',
   '.hg',
@@ -505,6 +557,52 @@ function splitToolOutputLines(output = '') {
     .filter(Boolean);
 }
 
+function escapeRegExp(value = '') {
+  return String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function globPatternToRegExp(pattern = '') {
+  const normalized = String(pattern || '').trim().replaceAll('\\', '/');
+  if (!normalized) {
+    return null;
+  }
+
+  let source = '';
+  for (let index = 0; index < normalized.length; index += 1) {
+    const char = normalized[index];
+    const nextChar = normalized[index + 1];
+    if (char === '*') {
+      if (nextChar === '*') {
+        source += '.*';
+        index += 1;
+      } else {
+        source += '[^/]*';
+      }
+      continue;
+    }
+    if (char === '?') {
+      source += '[^/]';
+      continue;
+    }
+    source += escapeRegExp(char);
+  }
+
+  return new RegExp(`(^|/)${source}$`);
+}
+
+function filterFilesByGlobOrText(files, pattern = '') {
+  const trimmedPattern = String(pattern || '').trim();
+  if (!trimmedPattern) {
+    return files;
+  }
+
+  const matcher = /[*?]/.test(trimmedPattern) ? globPatternToRegExp(trimmedPattern) : null;
+  return files.filter((file) => {
+    const normalizedFile = String(file || '').replaceAll('\\', '/');
+    return matcher ? matcher.test(normalizedFile) : normalizedFile.includes(trimmedPattern);
+  });
+}
+
 function formatListFilesResult({ files, limit, root, source, tool = 'list_files' }) {
   const truncated = files.length > limit;
   const visibleFiles = truncated ? files.slice(0, limit) : files;
@@ -520,6 +618,54 @@ function formatListFilesResult({ files, limit, root, source, tool = 'list_files'
     source,
     message: truncated ? `Output limited to the first ${limit} files. Pass a narrower path, pattern, or higher limit for more.` : undefined,
   };
+}
+
+async function searchWorkspaceTextFromDisk(workspaceRoot, relativePath, query, {
+  fileLimit = DEFAULT_SEARCH_TEXT_FILE_LIMIT,
+  matchLimit = DEFAULT_SEARCH_TEXT_MATCH_LIMIT,
+} = {}) {
+  const files = await listFilesFromDisk(workspaceRoot, relativePath, { limit: fileLimit });
+  const matches = [];
+
+  for (const file of files.slice(0, fileLimit)) {
+    if (matches.length >= matchLimit) {
+      break;
+    }
+
+    const filePath = resolveWorkspacePath(workspaceRoot, file);
+    let details = null;
+    try {
+      details = await stat(filePath);
+    } catch (_error) {
+      continue;
+    }
+    if (!details?.isFile() || details.size > MAX_SEARCH_TEXT_FILE_BYTES) {
+      continue;
+    }
+
+    let content = '';
+    try {
+      content = await readFile(filePath, 'utf8');
+    } catch (_error) {
+      continue;
+    }
+
+    const lines = content.split(/\r?\n/);
+    for (let index = 0; index < lines.length; index += 1) {
+      if (matches.length >= matchLimit) {
+        break;
+      }
+      if (lines[index].includes(query)) {
+        matches.push({
+          path: file,
+          line_number: index + 1,
+          line_text: lines[index],
+        });
+      }
+    }
+  }
+
+  return matches;
 }
 
 async function listFilesFromDisk(workspaceRoot, relativePath, { pattern = '', limit = DEFAULT_LIST_FILES_LIMIT } = {}) {
@@ -719,7 +865,12 @@ async function resolveExistingWorkspaceFile(workspaceRoot, requestedPath = '') {
       timeoutMs: 10000,
     });
     exactMatches.push(...String(exactResult.stdout || '').split(/\r?\n/).map((line) => line.trim()).filter(Boolean));
-  } catch (_error) {}
+  } catch (_error) {
+    try {
+      const diskMatches = await listFilesFromDisk(workspaceRoot, '.', { limit: MAX_LIST_FILES_LIMIT });
+      exactMatches.push(...diskMatches.filter((line) => basename(line) === fileName));
+    } catch (_fallbackError) {}
+  }
 
   const dedupedExactMatches = [...new Set(exactMatches)];
   if (dedupedExactMatches.length === 1) {
@@ -738,32 +889,34 @@ async function resolveExistingWorkspaceFile(workspaceRoot, requestedPath = '') {
     throw new Error(`ENOENT: no such file or directory, open '${exactPath}'`);
   }
 
+  const fuzzyMatches = [];
   try {
     const fuzzyResult = await runShellCommand('rg --files .', {
       cwd: workspaceRoot,
       timeoutMs: 15000,
     });
-    const fuzzyMatches = String(fuzzyResult.stdout || '')
+    fuzzyMatches.push(...String(fuzzyResult.stdout || '')
       .split(/\r?\n/)
       .map((line) => line.trim())
       .filter(Boolean)
-      .filter((line) => normalizeLookupName(basename(line)) === normalizedRequestedName);
+      .filter((line) => normalizeLookupName(basename(line)) === normalizedRequestedName));
+  } catch (_error) {
+    try {
+      const diskMatches = await listFilesFromDisk(workspaceRoot, '.', { limit: MAX_LIST_FILES_LIMIT });
+      fuzzyMatches.push(...diskMatches.filter((line) => normalizeLookupName(basename(line)) === normalizedRequestedName));
+    } catch (_fallbackError) {}
+  }
 
-    const dedupedFuzzyMatches = [...new Set(fuzzyMatches)];
-    if (dedupedFuzzyMatches.length === 1) {
-      const matchedRelativePath = dedupedFuzzyMatches[0];
-      return {
-        absolutePath: resolveWorkspacePath(workspaceRoot, matchedRelativePath),
-        relativePath: matchedRelativePath.replaceAll('\\', '/'),
-      };
-    }
-    if (dedupedFuzzyMatches.length > 1) {
-      throw new Error(`Multiple workspace files closely match '${trimmedPath}': ${dedupedFuzzyMatches.slice(0, 8).join(', ')}`);
-    }
-  } catch (error) {
-    if (String(error?.message || '').includes('Multiple workspace files')) {
-      throw error;
-    }
+  const dedupedFuzzyMatches = [...new Set(fuzzyMatches)];
+  if (dedupedFuzzyMatches.length === 1) {
+    const matchedRelativePath = dedupedFuzzyMatches[0];
+    return {
+      absolutePath: resolveWorkspacePath(workspaceRoot, matchedRelativePath),
+      relativePath: matchedRelativePath.replaceAll('\\', '/'),
+    };
+  }
+  if (dedupedFuzzyMatches.length > 1) {
+    throw new Error(`Multiple workspace files closely match '${trimmedPath}': ${dedupedFuzzyMatches.slice(0, 8).join(', ')}`);
   }
 
   throw new Error(`ENOENT: no such file or directory, open '${exactPath}'`);
@@ -906,12 +1059,22 @@ export class LocalToolExecutor {
     const relativePath = String(input.path || '.').trim() || '.';
     const escapedPath = relativePath.replaceAll('"', '\\"');
     const command = `rg -n ${JSON.stringify(query)} "${escapedPath}"`;
-    const result = await runShellCommand(command, { cwd: this.workspaceRoot });
+    let output = '';
+    let source = 'rg';
+    try {
+      const result = await runShellCommand(command, { cwd: this.workspaceRoot });
+      output = result.stdout;
+    } catch (_error) {
+      source = 'filesystem';
+      const matches = await searchWorkspaceTextFromDisk(this.workspaceRoot, relativePath, query);
+      output = matches.map((match) => `${match.path}:${match.line_number}:${match.line_text}`).join('\n');
+    }
     return {
       ok: true,
       tool: 'search_text',
       query,
-      output: result.stdout,
+      output,
+      source,
     };
   }
 
@@ -1003,14 +1166,20 @@ export class LocalToolExecutor {
 
   async insertInFile(input = {}) {
     const relativePath = String(input.path || '').trim();
-    const rawPosition = String(input.position || input.location || 'after').trim().toLowerCase();
+    const hasExplicitPosition = Object.prototype.hasOwnProperty.call(input, 'position')
+      || Object.prototype.hasOwnProperty.call(input, 'location');
+    const rawAnchorHint = String(input.anchor || input.anchorText || input.search_text || '').trim().toLowerCase();
+    const rawPosition = String(
+      input.position
+      || input.location
+      || (!Object.prototype.hasOwnProperty.call(input, 'anchor_text') && ['start', 'beginning', 'top', 'end', 'bottom'].includes(rawAnchorHint) ? rawAnchorHint : 'after')
+    ).trim().toLowerCase();
     const anchorText = String(
       input.anchor_text
-      || input.anchorText
-      || input.anchor
-      || input.search_text
+      || (hasExplicitPosition ? (input.anchorText || input.anchor || input.search_text) : (!['start', 'beginning', 'top', 'end', 'bottom'].includes(rawAnchorHint) ? (input.anchorText || input.anchor || input.search_text) : ''))
       || '',
     );
+    const lineNumber = Number.parseInt(String(input.line_number || input.lineNumber || input.line || ''), 10) || 0;
     const text = String(input.text || '');
     const position = ['start', 'beginning', 'top'].includes(rawPosition)
       ? 'start'
@@ -1024,6 +1193,38 @@ export class LocalToolExecutor {
     const resolvedFile = await resolveExistingWorkspaceFile(this.workspaceRoot, relativePath);
     const filePath = resolvedFile.absolutePath;
     const original = await readFile(filePath, 'utf8');
+    if (lineNumber > 0) {
+      const linePosition = hasExplicitPosition && position === 'after' ? 'after' : 'before';
+      if (anchorText) {
+        const lineRange = getLineRange(original, lineNumber);
+        const anchorIndex = occurrence === 'last' ? lineRange.text.lastIndexOf(anchorText) : lineRange.text.indexOf(anchorText);
+        if (anchorIndex === -1) {
+          throw new Error(`insert_in_file could not find the anchor_text on line ${lineNumber}.`);
+        }
+        const insertionPoint = lineRange.start + anchorIndex + (linePosition === 'after' ? anchorText.length : 0);
+        const nextContent = `${original.slice(0, insertionPoint)}${text}${original.slice(insertionPoint)}`;
+        await writeFile(filePath, nextContent, 'utf8');
+        return {
+          ok: true,
+          tool: 'insert_in_file',
+          path: resolvedFile.relativePath,
+          line_number: lineNumber,
+          position: linePosition,
+          occurrence,
+          anchor_text: anchorText,
+        };
+      }
+      const insertionPoint = getLineOffset(original, lineNumber, linePosition);
+      const nextContent = `${original.slice(0, insertionPoint)}${text}${original.slice(insertionPoint)}`;
+      await writeFile(filePath, nextContent, 'utf8');
+      return {
+        ok: true,
+        tool: 'insert_in_file',
+        path: resolvedFile.relativePath,
+        line_number: lineNumber,
+        position: linePosition,
+      };
+    }
     if (position === 'start' || position === 'end') {
       const insertionPoint = position === 'start' ? 0 : original.length;
       const nextContent = `${original.slice(0, insertionPoint)}${text}${original.slice(insertionPoint)}`;
@@ -1220,13 +1421,25 @@ export class LocalToolExecutor {
     const command = pattern
       ? `rg --files "${escapedPath}" -g ${JSON.stringify(pattern)}`
       : `rg --files "${escapedPath}"`;
-    const result = await runShellCommand(command, { cwd: this.workspaceRoot, timeoutMs: 10000 });
+    let files = [];
+    let source = 'rg';
+    try {
+      const result = await runShellCommand(command, { cwd: this.workspaceRoot, timeoutMs: 10000 });
+      files = String(result.stdout || '').split(/\r?\n/).filter(Boolean);
+    } catch (_error) {
+      source = 'filesystem';
+      files = filterFilesByGlobOrText(
+        await listFilesFromDisk(this.workspaceRoot, relativePath, { limit: MAX_LIST_FILES_LIMIT }),
+        pattern,
+      );
+    }
     return {
       ok: true,
       tool: 'find_files',
       path: relativePath,
       pattern,
-      files: String(result.stdout || '').split(/\r?\n/).filter(Boolean),
+      files,
+      source,
     };
   }
 
@@ -1260,27 +1473,35 @@ export class LocalToolExecutor {
     const relativePath = String(input.path || '.').trim() || '.';
     const escapedPath = relativePath.replaceAll('"', '\\"');
     const command = `rg -n --no-heading --color never ${JSON.stringify(query)} "${escapedPath}"`;
-    const result = await runShellCommand(command, { cwd: this.workspaceRoot });
-    const matches = String(result.stdout || '').split(/\r?\n/).filter(Boolean).map((line) => {
-      const match = line.match(/^(.*?):(\d+):(.*)$/);
-      if (!match) {
+    let source = 'rg';
+    let matches = [];
+    try {
+      const result = await runShellCommand(command, { cwd: this.workspaceRoot });
+      matches = String(result.stdout || '').split(/\r?\n/).filter(Boolean).map((line) => {
+        const match = line.match(/^(.*?):(\d+):(.*)$/);
+        if (!match) {
+          return {
+            path: '',
+            line_number: 0,
+            line_text: line,
+          };
+        }
         return {
-          path: '',
-          line_number: 0,
-          line_text: line,
+          path: match[1],
+          line_number: Number.parseInt(match[2], 10) || 0,
+          line_text: match[3],
         };
-      }
-      return {
-        path: match[1],
-        line_number: Number.parseInt(match[2], 10) || 0,
-        line_text: match[3],
-      };
-    });
+      });
+    } catch (_error) {
+      source = 'filesystem';
+      matches = await searchWorkspaceTextFromDisk(this.workspaceRoot, relativePath, query);
+    }
     return {
       ok: true,
       tool: 'grep_structured',
       query,
       matches,
+      source,
     };
   }
 
