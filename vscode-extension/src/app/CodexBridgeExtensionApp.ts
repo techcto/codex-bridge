@@ -750,8 +750,13 @@ async function buildSidebarState(context: vscode.ExtensionContext): Promise<Reco
   if (!extensionUiService) {
     throw new Error('Extension UI service is not ready.');
   }
+  const sidebarState = await extensionUiService.getSidebarViewState();
+  if (!Boolean(sidebarState.signedIn)) {
+    return sidebarState;
+  }
+
   return {
-    ...await extensionUiService.getSidebarViewState(),
+    ...sidebarState,
     ...await buildChatPanelState(context),
   };
 }

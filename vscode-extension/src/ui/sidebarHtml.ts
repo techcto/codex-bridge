@@ -628,6 +628,10 @@ export function buildSidebarHtml(): string {
       color: var(--accent-text);
       font-weight: 700;
     }
+    .send-button.stop-button {
+      background: var(--error);
+      color: #ffffff;
+    }
     .approval-overlay {
       position: fixed;
       inset: 0;
@@ -781,7 +785,7 @@ export function buildSidebarHtml(): string {
             <input id="attachmentInput" type="file" multiple hidden>
             <button id="attachButton" class="ghost-button" type="button">Attach</button>
           </div>
-          <button class="send-button" type="submit">Send</button>
+          <button id="sendButton" class="send-button" type="submit">Send</button>
         </div>
       </form>
     </section>
@@ -834,6 +838,7 @@ export function buildSidebarHtml(): string {
     const attachmentList = document.getElementById('attachmentList');
     const attachmentInput = document.getElementById('attachmentInput');
     const attachButton = document.getElementById('attachButton');
+    const sendButton = document.getElementById('sendButton');
     const approvalOverlay = document.getElementById('approvalOverlay');
     const approvalTitleNode = document.getElementById('approvalTitle');
     const approvalCopyNode = document.getElementById('approvalCopy');
@@ -853,6 +858,8 @@ export function buildSidebarHtml(): string {
     let pendingAssistantStartedAt = 0;
     let pendingAssistantTimer = null;
     let pendingApprovalState = null;
+    let activeSessionId = '';
+    let assistantRunning = false;
     let lastProgressMessage = '';
     let pendingAssistantCompleted = false;
     let viewMode = 'list';
@@ -881,6 +888,7 @@ export function buildSidebarHtml(): string {
       loginButtonLabel: 'Login',
       signupButtonLabel: 'Signup',
       agentRuntime: null,
+      activeSessionId: '',
       errorMessage: '',
     };
 
@@ -916,6 +924,15 @@ export function buildSidebarHtml(): string {
     function setStatus(value, isError) {
       statusNode.textContent = String(value || '');
       statusNode.className = isError ? 'status error' : 'status';
+    }
+
+    function setAssistantRunning(value, sessionId) {
+      assistantRunning = Boolean(value);
+      if (sessionId !== undefined) {
+        activeSessionId = String(sessionId || '');
+      }
+      sendButton.textContent = assistantRunning ? 'Stop' : 'Send';
+      sendButton.classList.toggle('stop-button', assistantRunning);
     }
 
     function escapeHtml(value) {
@@ -1058,24 +1075,29 @@ export function buildSidebarHtml(): string {
     }
 
     function parseFileTarget(target) {
-      const trimmed = String(target || '').trim();
+      const raw = String(target || '').trim();
+      let trimmed = raw;
+      try {
+        trimmed = decodeURIComponent(raw);
+      } catch (_error) {
+        trimmed = raw.replace(/%3A/ig, ':');
+      }
       if (!trimmed) {
         return null;
       }
 
-      const match = trimmed.match(/^(.*?)(?::(\d+))?$/);
-      if (!match) {
-        return null;
+      const match = trimmed.match(/^(.*):(\d+)$/);
+      let path = String(match ? match[1] : trimmed).trim();
+      const line = Number(match ? match[2] : '0');
+      if (path.startsWith('<') && path.endsWith('>')) {
+        path = path.slice(1, -1).trim();
       }
 
-      const path = String(match[1] || '').trim();
-      const line = Number(match[2] || '0');
       const looksLikeWorkspaceRelativePath =
         (path.includes('/') || /^[A-Za-z0-9_.-]+\.[A-Za-z0-9._-]+$/.test(path)) &&
         !path.startsWith('http://') &&
-        !path.startsWith('https://') &&
-        !path.startsWith('file://');
-      if (!path || !(path.startsWith('/') || path.startsWith('./') || path.startsWith('../') || /^[A-Za-z]:[\\/]/.test(path) || looksLikeWorkspaceRelativePath)) {
+        !path.startsWith('https://');
+      if (!path || !(path.startsWith('/') || path.startsWith('./') || path.startsWith('../') || path.startsWith('file://') || /^[A-Za-z]:[\\/]/.test(path) || looksLikeWorkspaceRelativePath)) {
         return null;
       }
 
@@ -1501,10 +1523,13 @@ export function buildSidebarHtml(): string {
 
     function applyState(payload, options) {
       const nextOptions = options && typeof options === 'object' ? options : {};
-      const preserveRenderedMessages = Boolean(nextOptions.preserveRenderedMessages);
+      const preserveRenderedMessages = Boolean(nextOptions.preserveRenderedMessages) || assistantRunning || Boolean(pendingAssistantNode);
       const wasSignedIn = Boolean(state.signedIn);
       const previousActiveThreadId = String(state.activeThreadId || '');
       state = Object.assign({}, state, payload || {});
+      if (state.activeSessionId) {
+        activeSessionId = String(state.activeSessionId || '');
+      }
       const signedIn = Boolean(state.signedIn);
       const providerMark = String(state.providerIcon || state.providerDisplayName || 'C').slice(0, 1).toUpperCase();
 
@@ -1728,7 +1753,12 @@ export function buildSidebarHtml(): string {
         return;
       }
       if (message.type === 'assistantStart') {
+        setAssistantRunning(true, message.value || activeSessionId);
         handleAssistantStart();
+        return;
+      }
+      if (message.type === 'assistantSession') {
+        setAssistantRunning(true, message.value || activeSessionId);
         return;
       }
       if (message.type === 'assistantDelta') {
@@ -1747,6 +1777,7 @@ export function buildSidebarHtml(): string {
         finalizeAssistantContent(message.value || '');
         finalizeAssistantMeta();
         pendingAssistantCompleted = true;
+        setAssistantRunning(false);
         setStatus('', false);
         return;
       }
@@ -1771,12 +1802,24 @@ export function buildSidebarHtml(): string {
         pendingAssistantStartedAt = 0;
         lastProgressMessage = '';
         pendingAssistantCompleted = false;
+        setAssistantRunning(false);
         setStatus(String(message.value || 'Unexpected error'), true);
       }
     });
 
     form.addEventListener('submit', function(event) {
       event.preventDefault();
+      if (assistantRunning) {
+        if (activeSessionId) {
+          postToExtension({
+            type: 'cancelSession',
+            sessionId: activeSessionId,
+          });
+        }
+        setStatus('Stopping...', false);
+        return;
+      }
+
       const promptValue = String(promptNode.value || '').trim();
       const nextAttachments = attachments.slice();
       if (!promptValue && !nextAttachments.length) {
@@ -1803,6 +1846,7 @@ export function buildSidebarHtml(): string {
         attachments: nextAttachments,
       });
 
+      setAssistantRunning(true);
       promptNode.value = '';
       attachments = [];
       renderAttachments();

@@ -200,6 +200,7 @@ export class ChatPanelStateService {
       agentRuntime,
       activeThreadId: refreshedThread.id,
       activeThreadTitle: refreshedThread.title,
+      activeSessionId: refreshedThread.sessionId || '',
       osirusChatId: refreshedThread.osirusChatId || '',
       osirusModels: osirusModels.map((option) => ({
         id: option.id,

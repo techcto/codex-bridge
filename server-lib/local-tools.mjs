@@ -44,6 +44,20 @@ export const LOCAL_TOOL_DEFINITIONS = [
     },
   },
   {
+    name: 'file_search',
+    description: 'Local workspace equivalent of hosted file_search: search workspace files by text query and/or glob pattern.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        query: { type: 'string' },
+        path: { type: 'string' },
+        pattern: { type: 'string' },
+        limit: { type: 'integer' },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
     name: 'write_file',
     description: 'Write UTF-8 text content directly to a workspace file.',
     input_schema: {
@@ -77,10 +91,78 @@ export const LOCAL_TOOL_DEFINITIONS = [
       properties: {
         path: { type: 'string' },
         old_text: { type: 'string' },
+        oldText: { type: 'string' },
+        old: { type: 'string' },
         new_text: { type: 'string' },
+        newText: { type: 'string' },
+        new_content: { type: 'string' },
+        newContent: { type: 'string' },
+        new: { type: 'string' },
+        new_lines: {
+          type: 'array',
+          items: { type: 'string' },
+        },
+        newLines: {
+          type: 'array',
+          items: { type: 'string' },
+        },
         replace_all: { type: 'boolean' },
       },
-      required: ['path', 'old_text', 'new_text'],
+      required: ['path'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'replace_lines_in_file',
+    description: 'Replace one or more complete lines in a workspace file, starting at a 1-based line number.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        path: { type: 'string' },
+        line_number: { type: 'integer' },
+        lineNumber: { type: 'integer' },
+        line: { type: 'integer' },
+        start_line: { type: 'integer' },
+        startLine: { type: 'integer' },
+        end_line: { type: 'integer' },
+        endLine: { type: 'integer' },
+        count: { type: 'integer' },
+        text: { type: 'string' },
+        content: { type: 'string' },
+        new_text: { type: 'string' },
+        newText: { type: 'string' },
+        new_content: { type: 'string' },
+        newContent: { type: 'string' },
+        new_lines: {
+          type: 'array',
+          items: { type: 'string' },
+        },
+        newLines: {
+          type: 'array',
+          items: { type: 'string' },
+        },
+      },
+      required: ['path'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'remove_lines_in_file',
+    description: 'Remove one or more complete lines from a workspace file, starting at a 1-based line number.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        path: { type: 'string' },
+        line_number: { type: 'integer' },
+        lineNumber: { type: 'integer' },
+        line: { type: 'integer' },
+        start_line: { type: 'integer' },
+        startLine: { type: 'integer' },
+        end_line: { type: 'integer' },
+        endLine: { type: 'integer' },
+        count: { type: 'integer' },
+      },
+      required: ['path'],
       additionalProperties: false,
     },
   },
@@ -99,11 +181,43 @@ export const LOCAL_TOOL_DEFINITIONS = [
         lineNumber: { type: 'integer' },
         line: { type: 'integer' },
         text: { type: 'string' },
+        content: { type: 'string' },
+        insert_text: { type: 'string' },
+        insertText: { type: 'string' },
         position: { type: 'string', enum: ['before', 'after', 'start', 'end', 'beginning', 'top', 'bottom'] },
         location: { type: 'string', enum: ['start', 'end', 'beginning', 'top', 'bottom'] },
         occurrence: { type: 'string', enum: ['first', 'last'] },
       },
-      required: ['path', 'text'],
+      required: ['path'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'move_text_in_file',
+    description: 'Move existing text within a workspace file before or after an anchor string, at a line number, or to the start/end.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        path: { type: 'string' },
+        text: { type: 'string' },
+        content: { type: 'string' },
+        insert_text: { type: 'string' },
+        insertText: { type: 'string' },
+        source_text: { type: 'string' },
+        sourceText: { type: 'string' },
+        anchor_text: { type: 'string' },
+        anchorText: { type: 'string' },
+        anchor: { type: 'string' },
+        search_text: { type: 'string' },
+        line_number: { type: 'integer' },
+        lineNumber: { type: 'integer' },
+        line: { type: 'integer' },
+        position: { type: 'string', enum: ['before', 'after', 'start', 'end', 'beginning', 'top', 'bottom'] },
+        location: { type: 'string', enum: ['start', 'end', 'beginning', 'top', 'bottom'] },
+        occurrence: { type: 'string', enum: ['first', 'last'] },
+        source_occurrence: { type: 'string', enum: ['first', 'last'] },
+      },
+      required: ['path'],
       additionalProperties: false,
     },
   },
@@ -248,6 +362,18 @@ export const LOCAL_TOOL_DEFINITIONS = [
     },
   },
   {
+    name: 'shell',
+    description: 'Local equivalent of the shell tool: run a shell command inside the workspace root.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        command: { type: 'string' },
+      },
+      required: ['command'],
+      additionalProperties: false,
+    },
+  },
+  {
     name: 'git_status',
     description: 'Inspect local git status in the workspace root.',
     input_schema: {
@@ -263,6 +389,7 @@ export const LOCAL_TOOL_DEFINITIONS = [
       type: 'object',
       properties: {
         limit: { type: 'integer' },
+        n: { type: 'integer' },
         author: { type: 'string' },
         options: { type: 'string' },
       },
@@ -351,6 +478,92 @@ export const LOCAL_TOOL_DEFINITIONS = [
     },
   },
 ];
+
+const OPENAI_FUNCTION_NAME_PATTERN = /^[a-zA-Z0-9_-]{1,64}$/;
+
+export const OPENAI_HOSTED_TOOL_TYPES = Object.freeze([
+  'web_search',
+  'file_search',
+  'computer_use',
+  'code_interpreter',
+  'image_generation',
+  'mcp',
+  'tool_search',
+]);
+
+function cloneJson(value) {
+  return JSON.parse(JSON.stringify(value ?? null));
+}
+
+export function getLocalToolDefinitions() {
+  return cloneJson(LOCAL_TOOL_DEFINITIONS);
+}
+
+export function validateLocalToolDefinitionNames(toolDefinitions = LOCAL_TOOL_DEFINITIONS) {
+  const invalid = [];
+  const seen = new Set();
+
+  for (const tool of Array.isArray(toolDefinitions) ? toolDefinitions : []) {
+    const name = String(tool?.name || '').trim();
+    if (!OPENAI_FUNCTION_NAME_PATTERN.test(name)) {
+      invalid.push({ name, reason: 'Tool names must match /^[a-zA-Z0-9_-]{1,64}$/ for OpenAI function tools.' });
+      continue;
+    }
+    if (seen.has(name)) {
+      invalid.push({ name, reason: 'Duplicate local tool name.' });
+      continue;
+    }
+    seen.add(name);
+  }
+
+  return invalid;
+}
+
+export function toOpenAIResponsesFunctionTool(toolDefinition = {}) {
+  const name = String(toolDefinition.name || '').trim();
+  if (!OPENAI_FUNCTION_NAME_PATTERN.test(name)) {
+    throw new Error(`Invalid OpenAI function tool name: ${name || '(empty)'}`);
+  }
+
+  return {
+    type: 'function',
+    name,
+    description: String(toolDefinition.description || ''),
+    parameters: cloneJson(toolDefinition.input_schema || {
+      type: 'object',
+      properties: {},
+      additionalProperties: false,
+    }),
+  };
+}
+
+export function toOpenAIChatCompletionsFunctionTool(toolDefinition = {}) {
+  const responseTool = toOpenAIResponsesFunctionTool(toolDefinition);
+  return {
+    type: 'function',
+    function: {
+      name: responseTool.name,
+      description: responseTool.description,
+      parameters: responseTool.parameters,
+    },
+  };
+}
+
+export function getOpenAIResponsesLocalTools(options = {}) {
+  const include = Array.isArray(options.include) ? new Set(options.include.map((name) => String(name || '').trim()).filter(Boolean)) : null;
+  const exclude = new Set((Array.isArray(options.exclude) ? options.exclude : []).map((name) => String(name || '').trim()).filter(Boolean));
+  return LOCAL_TOOL_DEFINITIONS
+    .filter((tool) => (!include || include.has(tool.name)) && !exclude.has(tool.name))
+    .map(toOpenAIResponsesFunctionTool);
+}
+
+export function getOpenAIChatCompletionsLocalTools(options = {}) {
+  const include = Array.isArray(options.include) ? new Set(options.include.map((name) => String(name || '').trim()).filter(Boolean)) : null;
+  const exclude = new Set((Array.isArray(options.exclude) ? options.exclude : []).map((name) => String(name || '').trim()).filter(Boolean));
+  return LOCAL_TOOL_DEFINITIONS
+    .filter((tool) => (!include || include.has(tool.name)) && !exclude.has(tool.name))
+    .map(toOpenAIChatCompletionsFunctionTool);
+}
 
 export function summarizeLocalToolProtocol() {
   return LOCAL_TOOL_DEFINITIONS.map((tool) => `- ${tool.name}: ${tool.description}`).join('\n');
@@ -468,6 +681,24 @@ function getLineRange(text = '', lineNumber = 1) {
   };
 }
 
+function getLineBlockRange(text = '', lineNumber = 1, count = 1) {
+  const targetLine = Math.max(1, Number.parseInt(String(lineNumber || ''), 10) || 1);
+  const lineCount = Math.max(1, Number.parseInt(String(count || ''), 10) || 1);
+  const rawText = String(text || '');
+  const start = getLineOffset(rawText, targetLine, 'before');
+  let end = start;
+
+  for (let index = 0; index < lineCount; index += 1) {
+    end = getLineOffset(rawText, targetLine + index, 'after');
+  }
+
+  return {
+    start,
+    end,
+    text: rawText.slice(start, end),
+  };
+}
+
 function normalizeLookupName(value = '') {
   return String(value || '').toLowerCase().replace(/[^a-z0-9]/g, '');
 }
@@ -517,6 +748,259 @@ function buildCommitUrl(remoteUrl = '', commitSha = '') {
   }
 
   return '';
+}
+
+function escapeMarkdownLinkLabel(value = '') {
+  return String(value || '').replace(/\\/g, '\\\\').replace(/\]/g, '\\]');
+}
+
+function escapeMarkdownLinkTarget(value = '') {
+  return String(value || '').replace(/\)/g, '%29');
+}
+
+function parseGitNameStatusLine(line = '') {
+  const parts = String(line || '').split('\t');
+  const status = String(parts[0] || '').trim();
+  if (!status) {
+    return null;
+  }
+
+  if (/^R\d*/i.test(status) || /^C\d*/i.test(status)) {
+    const oldPath = String(parts[1] || '').trim();
+    const path = String(parts[2] || oldPath).trim();
+    if (!path) {
+      return null;
+    }
+    return {
+      status,
+      path,
+      old_path: oldPath || undefined,
+    };
+  }
+
+  const path = String(parts[1] || '').trim();
+  if (!path) {
+    return null;
+  }
+  return {
+    status,
+    path,
+  };
+}
+
+function formatGitChangedFile(file = {}) {
+  const status = String(file.status || '').trim();
+  const path = String(file.path || '').trim();
+  const oldPath = String(file.old_path || '').trim();
+  if (!path) {
+    return '';
+  }
+
+  const label = oldPath && oldPath !== path
+    ? `${status} ${oldPath} -> ${path}`
+    : `${status} ${path}`;
+  return `  - [${escapeMarkdownLinkLabel(label)}](${escapeMarkdownLinkTarget(path)})`;
+}
+
+function getInsertedTextInput(input = {}) {
+  return String(
+    Object.prototype.hasOwnProperty.call(input, 'text') ? input.text
+      : Object.prototype.hasOwnProperty.call(input, 'content') ? input.content
+        : Object.prototype.hasOwnProperty.call(input, 'insert_text') ? input.insert_text
+          : Object.prototype.hasOwnProperty.call(input, 'insertText') ? input.insertText
+            : '',
+  );
+}
+
+function getReplacementTextInput(input = {}) {
+  if (Array.isArray(input.new_lines)) {
+    return input.new_lines.map((line) => String(line ?? '')).join('\n');
+  }
+  if (Array.isArray(input.newLines)) {
+    return input.newLines.map((line) => String(line ?? '')).join('\n');
+  }
+
+  return String(
+    Object.prototype.hasOwnProperty.call(input, 'new_text') ? input.new_text
+      : Object.prototype.hasOwnProperty.call(input, 'newText') ? input.newText
+        : Object.prototype.hasOwnProperty.call(input, 'new_content') ? input.new_content
+          : Object.prototype.hasOwnProperty.call(input, 'newContent') ? input.newContent
+            : Object.prototype.hasOwnProperty.call(input, 'new') ? input.new
+            : getInsertedTextInput(input),
+  );
+}
+
+function getOldTextInput(input = {}) {
+  return String(
+    Object.prototype.hasOwnProperty.call(input, 'old_text') ? input.old_text
+      : Object.prototype.hasOwnProperty.call(input, 'oldText') ? input.oldText
+        : Object.prototype.hasOwnProperty.call(input, 'old') ? input.old
+          : '',
+  );
+}
+
+function getLineNumberInput(input = {}) {
+  return Number.parseInt(String(
+    input.line_number
+    || input.lineNumber
+    || input.line
+    || input.start_line
+    || input.startLine
+    || '',
+  ), 10) || 0;
+}
+
+function getLineCountInput(input = {}) {
+  const explicitCount = Number.parseInt(String(input.count || ''), 10) || 0;
+  if (explicitCount > 0) {
+    return explicitCount;
+  }
+
+  const startLine = getLineNumberInput(input);
+  const endLine = Number.parseInt(String(input.end_line || input.endLine || ''), 10) || 0;
+  if (startLine > 0 && endLine >= startLine) {
+    return endLine - startLine + 1;
+  }
+
+  return 1;
+}
+
+function getSourceTextInput(input = {}) {
+  return String(
+    Object.prototype.hasOwnProperty.call(input, 'source_text') ? input.source_text
+      : Object.prototype.hasOwnProperty.call(input, 'sourceText') ? input.sourceText
+        : getInsertedTextInput(input),
+  );
+}
+
+function getInsertPlacementInput(input = {}) {
+  const hasExplicitPosition = Object.prototype.hasOwnProperty.call(input, 'position')
+    || Object.prototype.hasOwnProperty.call(input, 'location');
+  const rawAnchorHint = String(input.anchor || input.anchorText || input.search_text || '').trim().toLowerCase();
+  const rawPosition = String(
+    input.position
+    || input.location
+    || (!Object.prototype.hasOwnProperty.call(input, 'anchor_text') && ['start', 'beginning', 'top', 'end', 'bottom'].includes(rawAnchorHint) ? rawAnchorHint : 'after')
+  ).trim().toLowerCase();
+  const anchorText = String(
+    input.anchor_text
+    || (hasExplicitPosition ? (input.anchorText || input.anchor || input.search_text) : (!['start', 'beginning', 'top', 'end', 'bottom'].includes(rawAnchorHint) ? (input.anchorText || input.anchor || input.search_text) : ''))
+    || '',
+  );
+  const lineNumber = Number.parseInt(String(input.line_number || input.lineNumber || input.line || ''), 10) || 0;
+  const position = ['start', 'beginning', 'top'].includes(rawPosition)
+    ? 'start'
+    : (['end', 'bottom'].includes(rawPosition) ? 'end' : (rawPosition === 'before' ? 'before' : 'after'));
+  const occurrence = String(input.occurrence || 'first').trim().toLowerCase() === 'last' ? 'last' : 'first';
+
+  return {
+    anchorText,
+    hasExplicitPosition,
+    lineNumber,
+    occurrence,
+    position,
+  };
+}
+
+function findTextOccurrence(content = '', text = '', occurrence = 'first') {
+  const rawContent = String(content || '');
+  const needle = String(text || '');
+  if (!needle) {
+    return -1;
+  }
+  return String(occurrence || '').trim().toLowerCase() === 'last'
+    ? rawContent.lastIndexOf(needle)
+    : rawContent.indexOf(needle);
+}
+
+function getTextRemovalRange(content = '', text = '', index = -1) {
+  const rawContent = String(content || '');
+  const needle = String(text || '');
+  if (index < 0 || !needle) {
+    return null;
+  }
+
+  let start = index;
+  let end = index + needle.length;
+  const lineStart = rawContent.lastIndexOf('\n', Math.max(0, index - 1)) + 1;
+  const nextNewline = rawContent.indexOf('\n', end);
+  const lineEnd = nextNewline >= 0 ? nextNewline : rawContent.length;
+  const beforeOnLine = rawContent.slice(lineStart, index);
+  const afterOnLine = rawContent.slice(end, lineEnd);
+  const occupiesOwnLine = beforeOnLine.trim() === '' && afterOnLine.trim() === '';
+
+  if (occupiesOwnLine) {
+    start = lineStart;
+    end = lineEnd;
+    if (end < rawContent.length && rawContent[end] === '\n') {
+      end += 1;
+    } else if (start > 0 && rawContent[start - 1] === '\n') {
+      start -= 1;
+    }
+  }
+
+  return {
+    start,
+    end,
+    whole_line: occupiesOwnLine,
+  };
+}
+
+function insertIntoContent(content = '', text = '', placement = {}) {
+  const original = String(content || '');
+  const insertionText = String(text || '');
+  const position = placement.position || 'after';
+  const lineNumber = Number.parseInt(String(placement.lineNumber || ''), 10) || 0;
+  const anchorText = String(placement.anchorText || '');
+  const occurrence = String(placement.occurrence || 'first').trim().toLowerCase() === 'last' ? 'last' : 'first';
+
+  if (lineNumber > 0) {
+    const linePosition = placement.hasExplicitPosition && position === 'after' ? 'after' : 'before';
+    if (anchorText) {
+      const lineRange = getLineRange(original, lineNumber);
+      const anchorIndex = occurrence === 'last' ? lineRange.text.lastIndexOf(anchorText) : lineRange.text.indexOf(anchorText);
+      if (anchorIndex === -1) {
+        throw new Error(`insert_in_file could not find the anchor_text on line ${lineNumber}.`);
+      }
+      const insertionPoint = lineRange.start + anchorIndex + (linePosition === 'after' ? anchorText.length : 0);
+      return {
+        content: `${original.slice(0, insertionPoint)}${insertionText}${original.slice(insertionPoint)}`,
+        line_number: lineNumber,
+        position: linePosition,
+      };
+    }
+
+    const insertionPoint = getLineOffset(original, lineNumber, linePosition);
+    return {
+      content: `${original.slice(0, insertionPoint)}${insertionText}${original.slice(insertionPoint)}`,
+      line_number: lineNumber,
+      position: linePosition,
+    };
+  }
+
+  if (position === 'start' || position === 'end') {
+    const insertionPoint = position === 'start' ? 0 : original.length;
+    return {
+      content: `${original.slice(0, insertionPoint)}${insertionText}${original.slice(insertionPoint)}`,
+      line_number: getLineNumberFromOffset(original, insertionPoint),
+      position,
+    };
+  }
+
+  if (!anchorText) {
+    throw new Error('insert_in_file requires anchor_text (or anchorText, anchor, search_text) unless position is start or end.');
+  }
+
+  const index = occurrence === 'last' ? original.lastIndexOf(anchorText) : original.indexOf(anchorText);
+  if (index === -1) {
+    throw new Error('insert_in_file could not find the anchor_text.');
+  }
+  const insertionPoint = position === 'before' ? index : index + anchorText.length;
+  return {
+    content: `${original.slice(0, insertionPoint)}${insertionText}${original.slice(insertionPoint)}`,
+    line_number: getLineNumberFromOffset(original, insertionPoint),
+    position,
+  };
 }
 
 const DEFAULT_LIST_FILES_LIMIT = 1000;
@@ -939,14 +1423,22 @@ export class LocalToolExecutor {
         return this.readFile(input);
       case 'search_text':
         return this.searchText(input);
+      case 'file_search':
+        return this.fileSearch(input);
       case 'write_file':
         return this.writeFile(input);
       case 'append_file':
         return this.appendFile(input);
       case 'replace_in_file':
         return this.replaceInFile(input);
+      case 'replace_lines_in_file':
+        return this.replaceLinesInFile(input);
+      case 'remove_lines_in_file':
+        return this.removeLinesInFile(input);
       case 'insert_in_file':
         return this.insertInFile(input);
+      case 'move_text_in_file':
+        return this.moveTextInFile(input);
       case 'delete_file':
         return this.deleteFile(input);
       case 'create_directory':
@@ -969,6 +1461,8 @@ export class LocalToolExecutor {
         return this.grepStructured(input);
       case 'run_command':
         return this.runCommand(input);
+      case 'shell':
+        return this.shell(input);
       case 'git_status':
         return this.gitStatus();
       case 'git_log':
@@ -1078,6 +1572,41 @@ export class LocalToolExecutor {
     };
   }
 
+  async fileSearch(input = {}) {
+    const query = String(input.query || '').trim();
+    const pattern = String(input.pattern || '').trim();
+    const relativePath = String(input.path || '.').trim() || '.';
+    const limit = Number.parseInt(String(input.limit || ''), 10) || 0;
+
+    if (query) {
+      const result = await this.grepStructured({ query, path: relativePath });
+      const matches = limit > 0 ? result.matches.slice(0, limit) : result.matches;
+      return {
+        ok: true,
+        tool: 'file_search',
+        mode: 'text',
+        query,
+        path: relativePath,
+        matches,
+        count: matches.length,
+        source: result.source,
+      };
+    }
+
+    const result = await this.findFiles({ path: relativePath, pattern });
+    const files = limit > 0 ? result.files.slice(0, limit) : result.files;
+    return {
+      ok: true,
+      tool: 'file_search',
+      mode: 'files',
+      path: relativePath,
+      pattern,
+      files,
+      count: files.length,
+      source: result.source,
+    };
+  }
+
   async writeFile(input = {}) {
     const relativePath = String(input.path || '').trim();
     if (!relativePath) {
@@ -1127,8 +1656,8 @@ export class LocalToolExecutor {
 
   async replaceInFile(input = {}) {
     const relativePath = String(input.path || '').trim();
-    const oldText = String(input.old_text || '');
-    const newText = String(input.new_text || '');
+    const oldText = getOldTextInput(input);
+    const newText = getReplacementTextInput(input);
     const replaceAll = input.replace_all === true;
 
     if (!relativePath) {
@@ -1164,27 +1693,73 @@ export class LocalToolExecutor {
     };
   }
 
+  async replaceLinesInFile(input = {}) {
+    const relativePath = String(input.path || '').trim();
+    const lineNumber = getLineNumberInput(input);
+    const count = getLineCountInput(input);
+    let replacementText = getReplacementTextInput(input);
+
+    if (!relativePath) {
+      throw new Error('replace_lines_in_file requires a path.');
+    }
+    if (lineNumber <= 0) {
+      throw new Error('replace_lines_in_file requires line_number.');
+    }
+
+    const resolvedFile = await resolveExistingWorkspaceFile(this.workspaceRoot, relativePath);
+    const filePath = resolvedFile.absolutePath;
+    const original = await readFile(filePath, 'utf8');
+    const lineRange = getLineBlockRange(original, lineNumber, count);
+    if (replacementText && lineRange.text.endsWith('\n') && !replacementText.endsWith('\n')) {
+      replacementText += '\n';
+    }
+    const nextContent = `${original.slice(0, lineRange.start)}${replacementText}${original.slice(lineRange.end)}`;
+    await writeFile(filePath, nextContent, 'utf8');
+
+    return {
+      ok: true,
+      tool: 'replace_lines_in_file',
+      path: resolvedFile.relativePath,
+      line_number: lineNumber,
+      count: Math.max(1, count),
+      removed_text: lineRange.text,
+      inserted_text: replacementText,
+    };
+  }
+
+  async removeLinesInFile(input = {}) {
+    const relativePath = String(input.path || '').trim();
+    const lineNumber = getLineNumberInput(input);
+    const count = getLineCountInput(input);
+
+    if (!relativePath) {
+      throw new Error('remove_lines_in_file requires a path.');
+    }
+    if (lineNumber <= 0) {
+      throw new Error('remove_lines_in_file requires line_number.');
+    }
+
+    const resolvedFile = await resolveExistingWorkspaceFile(this.workspaceRoot, relativePath);
+    const filePath = resolvedFile.absolutePath;
+    const original = await readFile(filePath, 'utf8');
+    const lineRange = getLineBlockRange(original, lineNumber, count);
+    const nextContent = `${original.slice(0, lineRange.start)}${original.slice(lineRange.end)}`;
+    await writeFile(filePath, nextContent, 'utf8');
+
+    return {
+      ok: true,
+      tool: 'remove_lines_in_file',
+      path: resolvedFile.relativePath,
+      line_number: lineNumber,
+      count: Math.max(1, count),
+      removed_text: lineRange.text,
+    };
+  }
+
   async insertInFile(input = {}) {
     const relativePath = String(input.path || '').trim();
-    const hasExplicitPosition = Object.prototype.hasOwnProperty.call(input, 'position')
-      || Object.prototype.hasOwnProperty.call(input, 'location');
-    const rawAnchorHint = String(input.anchor || input.anchorText || input.search_text || '').trim().toLowerCase();
-    const rawPosition = String(
-      input.position
-      || input.location
-      || (!Object.prototype.hasOwnProperty.call(input, 'anchor_text') && ['start', 'beginning', 'top', 'end', 'bottom'].includes(rawAnchorHint) ? rawAnchorHint : 'after')
-    ).trim().toLowerCase();
-    const anchorText = String(
-      input.anchor_text
-      || (hasExplicitPosition ? (input.anchorText || input.anchor || input.search_text) : (!['start', 'beginning', 'top', 'end', 'bottom'].includes(rawAnchorHint) ? (input.anchorText || input.anchor || input.search_text) : ''))
-      || '',
-    );
-    const lineNumber = Number.parseInt(String(input.line_number || input.lineNumber || input.line || ''), 10) || 0;
-    const text = String(input.text || '');
-    const position = ['start', 'beginning', 'top'].includes(rawPosition)
-      ? 'start'
-      : (['end', 'bottom'].includes(rawPosition) ? 'end' : (rawPosition === 'before' ? 'before' : 'after'));
-    const occurrence = String(input.occurrence || 'first').trim().toLowerCase() === 'last' ? 'last' : 'first';
+    const text = getInsertedTextInput(input);
+    const placement = getInsertPlacementInput(input);
 
     if (!relativePath) {
       throw new Error('insert_in_file requires a path.');
@@ -1193,70 +1768,58 @@ export class LocalToolExecutor {
     const resolvedFile = await resolveExistingWorkspaceFile(this.workspaceRoot, relativePath);
     const filePath = resolvedFile.absolutePath;
     const original = await readFile(filePath, 'utf8');
-    if (lineNumber > 0) {
-      const linePosition = hasExplicitPosition && position === 'after' ? 'after' : 'before';
-      if (anchorText) {
-        const lineRange = getLineRange(original, lineNumber);
-        const anchorIndex = occurrence === 'last' ? lineRange.text.lastIndexOf(anchorText) : lineRange.text.indexOf(anchorText);
-        if (anchorIndex === -1) {
-          throw new Error(`insert_in_file could not find the anchor_text on line ${lineNumber}.`);
-        }
-        const insertionPoint = lineRange.start + anchorIndex + (linePosition === 'after' ? anchorText.length : 0);
-        const nextContent = `${original.slice(0, insertionPoint)}${text}${original.slice(insertionPoint)}`;
-        await writeFile(filePath, nextContent, 'utf8');
-        return {
-          ok: true,
-          tool: 'insert_in_file',
-          path: resolvedFile.relativePath,
-          line_number: lineNumber,
-          position: linePosition,
-          occurrence,
-          anchor_text: anchorText,
-        };
-      }
-      const insertionPoint = getLineOffset(original, lineNumber, linePosition);
-      const nextContent = `${original.slice(0, insertionPoint)}${text}${original.slice(insertionPoint)}`;
-      await writeFile(filePath, nextContent, 'utf8');
-      return {
-        ok: true,
-        tool: 'insert_in_file',
-        path: resolvedFile.relativePath,
-        line_number: lineNumber,
-        position: linePosition,
-      };
-    }
-    if (position === 'start' || position === 'end') {
-      const insertionPoint = position === 'start' ? 0 : original.length;
-      const nextContent = `${original.slice(0, insertionPoint)}${text}${original.slice(insertionPoint)}`;
-      await writeFile(filePath, nextContent, 'utf8');
-      return {
-        ok: true,
-        tool: 'insert_in_file',
-        path: resolvedFile.relativePath,
-        line_number: getLineNumberFromOffset(original, insertionPoint),
-        position,
-      };
-    }
-
-    if (anchorText === '') {
-      throw new Error('insert_in_file requires anchor_text (or anchorText, anchor, search_text) unless position is start or end.');
-    }
-
-    const index = occurrence === 'last' ? original.lastIndexOf(anchorText) : original.indexOf(anchorText);
-    if (index === -1) {
-      throw new Error('insert_in_file could not find the anchor_text.');
-    }
-
-    const insertionPoint = position === 'before' ? index : index + anchorText.length;
-    const nextContent = `${original.slice(0, insertionPoint)}${text}${original.slice(insertionPoint)}`;
-    await writeFile(filePath, nextContent, 'utf8');
+    const inserted = insertIntoContent(original, text, placement);
+    await writeFile(filePath, inserted.content, 'utf8');
     return {
       ok: true,
       tool: 'insert_in_file',
       path: resolvedFile.relativePath,
-      line_number: getLineNumberFromOffset(original, insertionPoint),
-      position,
-      occurrence,
+      line_number: inserted.line_number,
+      position: inserted.position,
+      occurrence: placement.occurrence,
+      anchor_text: placement.anchorText || undefined,
+    };
+  }
+
+  async moveTextInFile(input = {}) {
+    const relativePath = String(input.path || '').trim();
+    const sourceText = getSourceTextInput(input);
+    const text = getInsertedTextInput(input) || sourceText;
+    const placement = getInsertPlacementInput(input);
+    const sourceOccurrence = String(input.source_occurrence || 'last').trim().toLowerCase() === 'first' ? 'first' : 'last';
+    if (!relativePath) {
+      throw new Error('move_text_in_file requires a path.');
+    }
+    if (!text || !sourceText) {
+      throw new Error('move_text_in_file requires text and source_text.');
+    }
+
+    const resolvedFile = await resolveExistingWorkspaceFile(this.workspaceRoot, relativePath);
+    const filePath = resolvedFile.absolutePath;
+    const original = await readFile(filePath, 'utf8');
+    const sourceIndex = findTextOccurrence(original, sourceText, sourceOccurrence);
+    if (sourceIndex === -1) {
+      throw new Error('move_text_in_file could not find the source text.');
+    }
+    const removalRange = getTextRemovalRange(original, sourceText, sourceIndex);
+    if (!removalRange) {
+      throw new Error('move_text_in_file could not identify the source text range.');
+    }
+    const withoutSource = `${original.slice(0, removalRange.start)}${original.slice(removalRange.end)}`;
+    const destinationText = removalRange.whole_line && placement.lineNumber > 0 && !placement.anchorText && !text.includes('\n')
+      ? `${text}\n`
+      : text;
+    const inserted = insertIntoContent(withoutSource, destinationText, placement);
+    await writeFile(filePath, inserted.content, 'utf8');
+    return {
+      ok: true,
+      tool: 'move_text_in_file',
+      path: resolvedFile.relativePath,
+      line_number: inserted.line_number,
+      position: inserted.position,
+      occurrence: placement.occurrence,
+      source_occurrence: sourceOccurrence,
+      removed_whole_line: removalRange.whole_line,
     };
   }
 
@@ -1520,6 +2083,14 @@ export class LocalToolExecutor {
     };
   }
 
+  async shell(input = {}) {
+    const result = await this.runCommand(input);
+    return {
+      ...result,
+      tool: 'shell',
+    };
+  }
+
   async gitStatus() {
     const result = await runShellCommand('git status --short --branch', { cwd: this.workspaceRoot });
     return {
@@ -1530,7 +2101,11 @@ export class LocalToolExecutor {
   }
 
   async gitLog(input = {}) {
-    const limit = Number.isInteger(input.limit) ? input.limit : 10;
+    const limit = Number.isInteger(input.limit)
+      ? input.limit
+      : Number.isInteger(input.n)
+        ? input.n
+        : 10;
     const author = String(input.author || '').trim();
     const options = String(input.options || '').trim();
     if (options && /[;&|`$<>]/.test(options)) {
@@ -1544,25 +2119,55 @@ export class LocalToolExecutor {
       const remoteResult = await runShellCommand('git remote get-url origin', { cwd: this.workspaceRoot, timeoutMs: 5000 });
       remoteUrl = String(remoteResult.stdout || '').trim();
     } catch (_error) {}
-    const linkedOutput = String(result.stdout || '').split(/\r?\n/).map((line) => {
+    const commits = [];
+    const outputLines = [];
+    for (const line of String(result.stdout || '').split(/\r?\n/)) {
       const match = String(line || '').match(/^([0-9a-f]{7,40})(\b.*)$/i);
       if (!match) {
-        return line;
+        outputLines.push(line);
+        continue;
       }
       const sha = String(match[1] || '').trim();
       const remainder = String(match[2] || '');
       const commitUrl = buildCommitUrl(remoteUrl, sha);
-      if (!commitUrl) {
-        return line;
+      const commit = {
+        sha,
+        summary: String(line || '').trim(),
+        url: commitUrl || undefined,
+        files: [],
+      };
+
+      try {
+        const filesResult = await runShellCommand(`git show --name-status --format= ${JSON.stringify(sha)}`, {
+          cwd: this.workspaceRoot,
+          timeoutMs: 10000,
+        });
+        commit.files = String(filesResult.stdout || '')
+          .split(/\r?\n/)
+          .map(parseGitNameStatusLine)
+          .filter(Boolean);
+      } catch (_error) {}
+
+      commits.push(commit);
+      const commitLine = commitUrl ? `- [${sha}](${commitUrl})${remainder}` : line;
+      if (!commit.files.length) {
+        outputLines.push(commitLine);
+        continue;
       }
-      return `- [${sha}](${commitUrl})${remainder}`;
-    }).join('\n');
+      outputLines.push([
+        commitLine,
+        '  Files:',
+        ...commit.files.map(formatGitChangedFile).filter(Boolean),
+      ].join('\n'));
+    }
+    const linkedOutput = outputLines.join('\n');
     return {
       ok: true,
       tool: 'git_log',
       author,
       options: options || undefined,
       output: linkedOutput || result.stdout,
+      commits,
       remote_url: remoteUrl || undefined,
     };
   }

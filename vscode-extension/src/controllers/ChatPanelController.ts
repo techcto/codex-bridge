@@ -183,6 +183,21 @@ export class ChatPanelController {
       return;
     }
 
+    if (message?.type === 'cancelSession') {
+      const sessionId = String(message.sessionId || '').trim();
+      if (!sessionId) {
+        return;
+      }
+
+      await this.deps.requestJson<Record<string, unknown>>(
+        'POST',
+        `/chat/sessions/${encodeURIComponent(sessionId)}/cancel`,
+        {}
+      );
+      panel.webview.postMessage({ type: 'status', value: 'Stopping...' });
+      return;
+    }
+
     if (message?.type !== 'sendMessage') {
       return;
     }
@@ -365,6 +380,7 @@ export class ChatPanelController {
       panel.webview.postMessage({ type: 'assistantStart' });
     };
     ensureAssistantRenderStarted();
+    panel.webview.postMessage({ type: 'assistantSession', value: activeSessionId });
     const progressMessages: string[] = [];
     let completedTurn: { session: BridgeSessionRecord; assistantText: string };
     try {

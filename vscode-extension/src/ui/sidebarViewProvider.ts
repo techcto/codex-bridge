@@ -27,6 +27,8 @@ export class CodexBridgeSidebarProvider implements vscode.WebviewViewProvider {
   private view?: vscode.WebviewView;
   private isReady = false;
   private pendingStatePayload: Record<string, unknown> | undefined;
+  private refreshInFlight = false;
+  private refreshQueued = false;
 
   constructor(private readonly deps: SidebarProviderDeps) {}
 
@@ -47,7 +49,7 @@ export class CodexBridgeSidebarProvider implements vscode.WebviewViewProvider {
             break;
           case 'configure':
             await this.deps.configureConnection();
-            await this.refresh();
+            void this.refresh();
             break;
           case 'health':
             await this.deps.checkHealth();
@@ -63,7 +65,7 @@ export class CodexBridgeSidebarProvider implements vscode.WebviewViewProvider {
             } else {
               await this.deps.configureConnection();
             }
-            await this.refresh();
+            void this.refresh();
             break;
           case 'logout':
             if (this.deps.getCurrentRuntimeProvider() === 'osirus_agent') {
@@ -74,7 +76,7 @@ export class CodexBridgeSidebarProvider implements vscode.WebviewViewProvider {
               await this.deps.setProviderApiKey('');
               await this.deps.showInfo('Provider API key cleared for this extension.');
             }
-            await this.refresh();
+            void this.refresh();
             break;
           case 'switchOrg':
             if (this.deps.getCurrentRuntimeProvider() === 'osirus') {
@@ -82,14 +84,14 @@ export class CodexBridgeSidebarProvider implements vscode.WebviewViewProvider {
               await this.deps.refreshOpenOsirusChatState();
               await this.deps.showInfo(`Switched Osirus organization to ${resolved.orgName}.`);
             }
-            await this.refresh();
+            void this.refresh();
             break;
           case 'signup':
             if (this.deps.getCurrentRuntimeProvider() === 'osirus_agent' || this.deps.getCurrentRuntimeProvider() === 'osirus') {
               await this.deps.openExternal(vscode.Uri.parse(this.deps.getOsirusSignupUrl()));
             } else {
               await this.deps.configureConnection();
-              await this.refresh();
+              void this.refresh();
             }
             break;
           case 'apiKeys':
@@ -111,8 +113,8 @@ export class CodexBridgeSidebarProvider implements vscode.WebviewViewProvider {
             this.isReady = true;
             if (this.pendingStatePayload) {
               await this.deliverState(this.pendingStatePayload);
-            } else {
-              await this.refresh();
+            } else if (!this.refreshInFlight) {
+              void this.refresh();
             }
             break;
           default:
@@ -126,6 +128,14 @@ export class CodexBridgeSidebarProvider implements vscode.WebviewViewProvider {
         }
       } catch (error) {
         const detail = error instanceof Error ? error.message : String(error);
+        if (/operation was aborted|canceled by user|cancelled by user/i.test(detail)) {
+          this.deps.outputChannel?.appendLine(`[bridge] sidebar action stopped: ${detail}`);
+          if (this.view) {
+            void this.view.webview.postMessage({ type: 'status', value: 'Stopped.' });
+            void this.view.webview.postMessage({ type: 'assistantDone', value: '' });
+          }
+          return;
+        }
         this.deps.outputChannel?.appendLine(`[bridge] sidebar action failed: ${detail}`);
         void vscode.window.showErrorMessage(detail);
         if (this.view) {
@@ -143,13 +153,27 @@ export class CodexBridgeSidebarProvider implements vscode.WebviewViewProvider {
     if (!this.view) {
       return;
     }
+    if (this.refreshInFlight) {
+      this.refreshQueued = true;
+      return;
+    }
 
+    this.refreshInFlight = true;
     try {
-      await this.pushState(await this.deps.buildState());
-    } catch (error) {
-      const detail = error instanceof Error ? error.message : String(error);
-      this.view.webview.html = this.renderErrorHtml(detail);
-      this.isReady = false;
+      do {
+        this.refreshQueued = false;
+        try {
+          await this.pushState(await this.deps.buildState());
+        } catch (error) {
+          const detail = error instanceof Error ? error.message : String(error);
+          if (this.view) {
+            this.view.webview.html = this.renderErrorHtml(detail);
+          }
+          this.isReady = false;
+        }
+      } while (this.refreshQueued && this.view);
+    } finally {
+      this.refreshInFlight = false;
     }
   }
 
@@ -177,18 +201,39 @@ export class CodexBridgeSidebarProvider implements vscode.WebviewViewProvider {
   }
 
   private async openFileInEditor(rawPath: string, line: number): Promise<void> {
-    const normalized = rawPath.trim();
-    if (!normalized) {
+    const target = this.parseFileTarget(rawPath, line);
+    if (!target.path) {
       return;
     }
 
-    const path = this.resolveWorkspacePath(normalized);
+    const path = this.resolveWorkspacePath(target.path);
     const document = await vscode.workspace.openTextDocument(vscode.Uri.file(path));
-    const editor = await vscode.window.showTextDocument(document, { preview: false });
-    const targetLine = Math.max(0, Number.isFinite(line) ? line - 1 : 0);
+    const editor = await vscode.window.showTextDocument(document, { preview: false, preserveFocus: true });
+    const targetLine = Math.max(0, Number.isFinite(target.line) ? target.line - 1 : 0);
     const position = new vscode.Position(targetLine, 0);
     editor.selection = new vscode.Selection(position, position);
     editor.revealRange(new vscode.Range(position, position), vscode.TextEditorRevealType.InCenter);
+  }
+
+  private parseFileTarget(rawPath: string, line: number): { path: string; line: number } {
+    const raw = String(rawPath || '').trim();
+    let normalized = raw;
+    try {
+      normalized = decodeURIComponent(raw);
+    } catch {
+      normalized = raw.replace(/%3A/ig, ':');
+    }
+
+    if (normalized.startsWith('<') && normalized.endsWith('>')) {
+      normalized = normalized.slice(1, -1).trim();
+    }
+
+    const match = normalized.match(/^(.*):(\d+)$/);
+    const parsedLine = Number(match?.[2] || 0);
+    return {
+      path: String(match?.[1] || normalized).trim(),
+      line: parsedLine > 0 ? parsedLine : Number(line || 0),
+    };
   }
 
   private resolveWorkspacePath(rawPath: string): string {

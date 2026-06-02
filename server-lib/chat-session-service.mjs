@@ -18,17 +18,22 @@ export class ChatSessionService {
   }
 
   static MAX_INLINE_EXEC_PROMPT_CHARS = 12000;
+  static MAX_THINKING_CHARS = 12000;
   static MUTATING_TOOL_NAMES = new Set([
     'write_file',
     'append_file',
     'replace_in_file',
+    'replace_lines_in_file',
+    'remove_lines_in_file',
     'insert_in_file',
+    'move_text_in_file',
     'delete_file',
     'create_directory',
     'move_file',
     'copy_file',
     'apply_patch',
     'run_command',
+    'shell',
     'git_add',
     'git_commit',
     'git_checkout',
@@ -294,10 +299,11 @@ export class ChatSessionService {
         : 'Git status is clean.';
     }
 
-    const gitLogMatch = text.match(/\bgit log\b(?:\s+(\d+))?|show (?:me )?(?:the )?(?:recent )?(?:git )?(?:history|commits?)(?:\s+(\d+))?/i);
+    const gitLogMatch = text.match(/\bgit log\b(?:\s+(\d+))?|show (?:me )?(?:the )?(?:recent )?(?:git )?(?:history|commits?)(?:\s+(\d+))?|(?:what(?:'s| is)|show(?: me)?|list|tell me)\s+(?:the\s+)?(?:last|latest|most recent)\s+(?:git\s+)?commit\b/i);
     if (gitLogMatch) {
       const limit = Number.parseInt(gitLogMatch[1] || gitLogMatch[2] || '10', 10);
-      const result = await toolExecutor.execute('git_log', { limit: Number.isFinite(limit) ? limit : 10 });
+      const singleCommitRequest = /(?:last|latest|most recent)\s+(?:git\s+)?commit\b/i.test(text);
+      const result = await toolExecutor.execute('git_log', { limit: singleCommitRequest ? 1 : Number.isFinite(limit) ? limit : 10 });
       return result.output
         ? `Git log:\n${result.output}`
         : 'No git history was returned.';
@@ -374,6 +380,41 @@ export class ChatSessionService {
       queued: false,
       load: this.getBridgeLoad(),
     };
+  }
+
+  cancelSession(sessionId) {
+    const session = this.getSession(sessionId);
+    if (!session) {
+      return null;
+    }
+
+    this.pendingTurnQueue = this.pendingTurnQueue.filter((entry) => entry.session?.id !== session.id);
+    session.cancelRequested = true;
+    session.lastError = 'Canceled by user.';
+    session.pendingAttachments = [];
+    session.pendingApproval = null;
+    if (typeof session.pendingApprovalResolver === 'function') {
+      session.pendingApprovalResolver({ decision: 'deny' });
+    }
+    session.pendingApprovalResolver = null;
+
+    if (session.activeChild && typeof session.activeChild.kill === 'function') {
+      try {
+        session.activeChild.kill();
+      } catch (_error) {}
+    }
+
+    if (!session.running) {
+      session.status = 'idle';
+      session.updatedAt = Date.now();
+      this.publishSession(session, 'session.completed');
+    } else {
+      session.status = 'canceling';
+      session.updatedAt = Date.now();
+      this.publishSession(session, 'session.updated');
+    }
+
+    return session;
   }
 
   dispatchQueuedTurns() {
@@ -607,10 +648,15 @@ export class ChatSessionService {
   }
 
   async runExecPrompt(session, prompt, imagePaths = []) {
+    if (session.cancelRequested) {
+      throw new Error('Canceled by user.');
+    }
+
     const invocation = this.buildExecInvocation({ session, prompt, imagePaths, useResume: false });
     const child = await this.deps.spawnCodex(invocation.args, {
       allowStdin: Boolean(invocation.stdinText),
     });
+    session.activeChild = child;
     this.feedChildStdin(child, invocation.stdinText);
 
     return new Promise((resolve, reject) => {
@@ -659,6 +705,13 @@ export class ChatSessionService {
       });
 
       child.on('exit', (code) => {
+        if (session.activeChild === child) {
+          session.activeChild = null;
+        }
+        if (session.cancelRequested) {
+          reject(new Error('Canceled by user.'));
+          return;
+        }
         if (stdout.trim() !== '') {
           try {
             handleEvent(JSON.parse(stdout.trim()));
@@ -686,14 +739,34 @@ export class ChatSessionService {
     return fencedMatch ? String(fencedMatch[1] || '').trim() : text;
   }
 
+  capThinkingText(value = '', maxChars = ChatSessionService.MAX_THINKING_CHARS) {
+    const text = String(value || '').replace(/\n{3,}/g, '\n\n').trim();
+    if (!text || text.length <= maxChars) {
+      return text;
+    }
+
+    const prefix = '[Earlier thinking omitted]';
+    const tailLength = Math.max(1000, maxChars - prefix.length - 2);
+    return `${prefix}\n\n${text.slice(-tailLength)}`;
+  }
+
   splitReasoningContent(value) {
     const rawText = String(value || '');
     if (!rawText) {
-      return { text: '', thinking: '' };
+      return { text: '', thinking: '', hadReasoning: false };
     }
 
     const thinkingParts = [];
-    const textWithoutReasoning = rawText.replace(/<reasoning>([\s\S]*?)<\/reasoning>/gi, (_match, inner) => {
+    let hadReasoning = /<reasoning>/i.test(rawText);
+    let textWithoutReasoning = rawText.replace(/<reasoning>([\s\S]*?)<\/reasoning>/gi, (_match, inner) => {
+      const thinking = String(inner || '').trim();
+      if (thinking) {
+        thinkingParts.push(thinking);
+      }
+      return '\n';
+    });
+
+    textWithoutReasoning = textWithoutReasoning.replace(/<reasoning>([\s\S]*)$/i, (_match, inner) => {
       const thinking = String(inner || '').trim();
       if (thinking) {
         thinkingParts.push(thinking);
@@ -706,26 +779,104 @@ export class ChatSessionService {
         .replace(/<\/?reasoning>/gi, '')
         .replace(/\n{3,}/g, '\n\n')
         .trim(),
-      thinking: thinkingParts
-        .join('\n\n')
-        .replace(/\n{3,}/g, '\n\n')
-        .trim(),
+      thinking: this.capThinkingText(thinkingParts.join('\n\n')),
+      hadReasoning,
     };
   }
 
-  extractJsonObjectCandidate(value) {
+  extractJsonObjectCandidates(value) {
     const text = String(value || '').trim();
-    const firstBrace = text.indexOf('{');
-    const lastBrace = text.lastIndexOf('}');
-    if (firstBrace === -1 || lastBrace === -1 || lastBrace <= firstBrace) {
-      return '';
+    const candidates = [];
+
+    for (let start = 0; start < text.length; start += 1) {
+      if (text[start] !== '{') {
+        continue;
+      }
+
+      let depth = 0;
+      let inString = false;
+      let escaped = false;
+      for (let index = start; index < text.length; index += 1) {
+        const char = text[index];
+        if (escaped) {
+          escaped = false;
+          continue;
+        }
+        if (char === '\\') {
+          escaped = true;
+          continue;
+        }
+        if (char === '"') {
+          inString = !inString;
+          continue;
+        }
+        if (inString) {
+          continue;
+        }
+        if (char === '{') {
+          depth += 1;
+        } else if (char === '}') {
+          depth -= 1;
+          if (depth === 0) {
+            candidates.push(text.slice(start, index + 1).trim());
+            break;
+          }
+        }
+      }
     }
 
-    return text.slice(firstBrace, lastBrace + 1).trim();
+    return candidates;
   }
 
   normalizePlannerDecision(parsed = {}, rawText = '') {
+    if (Array.isArray(parsed)) {
+      for (const item of parsed) {
+        const normalized = this.normalizePlannerDecision(item, rawText);
+        if (normalized) {
+          return normalized;
+        }
+      }
+      return null;
+    }
+
+    const firstToolCall = Array.isArray(parsed?.tool_calls) ? parsed.tool_calls[0] : null;
+    if (firstToolCall) {
+      const functionRecord = firstToolCall.function && typeof firstToolCall.function === 'object'
+        ? firstToolCall.function
+        : firstToolCall;
+      return this.normalizePlannerDecision({
+        type: 'tool_call',
+        tool: functionRecord.name || firstToolCall.name || firstToolCall.tool,
+        input: functionRecord.arguments || firstToolCall.arguments || firstToolCall.input,
+      }, rawText);
+    }
+
+    if (parsed?.function_call && typeof parsed.function_call === 'object') {
+      return this.normalizePlannerDecision({
+        type: 'tool_call',
+        tool: parsed.function_call.name,
+        input: parsed.function_call.arguments || parsed.function_call.input,
+      }, rawText);
+    }
+
+    if (Array.isArray(parsed?.output)) {
+      for (const item of parsed.output) {
+        const normalized = this.normalizePlannerDecision(item, rawText);
+        if (normalized) {
+          return normalized;
+        }
+      }
+    }
+
     const rawType = String(parsed?.type || parsed?.kind || parsed?.action || '').trim().toLowerCase();
+    if (['function_call', 'tool_use'].includes(rawType)) {
+      return this.normalizePlannerDecision({
+        type: 'tool_call',
+        tool: parsed.name || parsed.tool || parsed.tool_name,
+        input: parsed.arguments || parsed.input,
+      }, rawText);
+    }
+
     const tool = String(
       parsed?.tool
       || parsed?.tool_name
@@ -750,23 +901,48 @@ export class ChatSessionService {
     return {
       type,
       tool,
-      input: parsed?.input && typeof parsed.input === 'object'
-        ? parsed.input
-        : (parsed?.arguments && typeof parsed.arguments === 'object' ? parsed.arguments : {}),
+      input: this.normalizePlannerInput(parsed?.input ?? parsed?.arguments),
       response: String(parsed?.response || parsed?.final || parsed?.message || parsed?.answer || rawText || '').trim(),
       explanation: String(parsed?.explanation || parsed?.reason || '').trim(),
     };
   }
 
+  normalizePlannerInput(value) {
+    if (value && typeof value === 'object' && !Array.isArray(value)) {
+      return value;
+    }
+
+    if (typeof value === 'string' && value.trim()) {
+      try {
+        const parsed = JSON.parse(value);
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+          return parsed;
+        }
+      } catch (_error) {}
+    }
+
+    return {};
+  }
+
   parseBridgePlannerResponse(raw) {
-    const text = this.stripCodeFences(raw);
-    const candidates = [text, this.extractJsonObjectCandidate(text)].filter(Boolean);
+    const split = this.splitReasoningContent(raw);
+    const text = this.stripCodeFences(split.text || '');
+    const rawText = this.stripCodeFences(raw);
+    const candidates = split.hadReasoning
+      ? [
+          text,
+          ...this.extractJsonObjectCandidates(text),
+        ].filter(Boolean)
+      : [
+          text || rawText,
+          ...this.extractJsonObjectCandidates(text || rawText),
+        ].filter(Boolean);
 
     for (const candidate of candidates) {
       try {
         const parsed = JSON.parse(candidate);
         const normalized = this.normalizePlannerDecision(parsed, text);
-        if (normalized) {
+        if (normalized && !this.isReasoningOnlyPlannerDecision(normalized)) {
           return normalized;
         }
       } catch (_error) {}
@@ -775,16 +951,43 @@ export class ChatSessionService {
     return null;
   }
 
+  isReasoningOnlyPlannerDecision(decision = {}) {
+    if (String(decision?.type || '') !== 'final') {
+      return false;
+    }
+
+    const response = String(decision?.response || '').trim();
+    return /<reasoning>[\s\S]*<\/reasoning>|^<reasoning>[\s\S]*$/i.test(response);
+  }
+
   buildBridgePlannerRepairPrompt(rawOutput) {
     return [
-      'Rewrite the previous planner response into valid JSON only.',
-      'Do not add markdown fences or any commentary.',
+      'Rewrite the previous planner response into exactly one valid JSON object.',
+      'The first character of your response must be { and the last character must be }.',
+      'Do not include <reasoning>, markdown fences, prose, comments, or any other text.',
       'Use exactly one of these JSON shapes:',
-      '{"type":"tool_call","tool":"read_file","input":{"path":"relative/path"},"explanation":"short reason"}',
+      '{"type":"tool_call","tool":"read_file","input":{"path":"README.md"},"explanation":"short reason"}',
       '{"type":"final","response":"final user-facing answer"}',
-      'If the previous response was proposing an edit, inspection, command, or git action, convert it into a tool_call.',
+      'If the previous response was proposing an edit, inspection, command, or git action, convert it into a tool_call with the closest available local tool name.',
+      'If the previous response says it needs to search for text, use {"type":"tool_call","tool":"search_text","input":{"query":"the text"},"explanation":"Locate the text."}.',
+      'If the previous response says it needs to read a file, use {"type":"tool_call","tool":"read_file","input":{"path":"README.md"},"explanation":"Read the file."}.',
+      'Never use placeholder paths such as relative/path, path/to/file, or file.md unless that is the actual file name.',
       'If the previous response was already the final answer to the user, convert it into a final response.',
       `Previous response:\n${String(rawOutput || '').trim()}`,
+    ].join('\n\n');
+  }
+
+  buildBridgePlannerJsonOnlyRetryPrompt(rawOutput) {
+    return [
+      'Output one JSON object now.',
+      'No reasoning. No <reasoning>. No explanation. No markdown.',
+      'Start with { and end with }.',
+      'Allowed shapes:',
+      '{"type":"tool_call","tool":"search_text","input":{"query":"hello red"},"explanation":"Locate text."}',
+      '{"type":"tool_call","tool":"read_file","input":{"path":"README.md"},"explanation":"Read file."}',
+      '{"type":"tool_call","tool":"move_text_in_file","input":{"path":"README.md","source_text":"hello red","text":" hello red","anchor_text":"sentence text","position":"after"},"explanation":"Move text."}',
+      '{"type":"final","response":"answer"}',
+      `Previous failed output:\n${String(rawOutput || '').trim()}`,
     ].join('\n\n');
   }
 
@@ -809,8 +1012,10 @@ export class ChatSessionService {
       'You are operating as a Codex planner for a local VS Code workspace tool executor.',
       'You must choose the next single tool action or provide the final user-facing answer.',
       'Never claim a file was edited, a command was run, or git was inspected unless that result is present in the tool transcript.',
-      'Return JSON only, with no markdown fences and no extra commentary.',
-      'Use exactly one of these JSON shapes:',
+      'Return exactly one JSON object as the final visible content of your response.',
+      'If your model emits hidden/internal reasoning, that reasoning must end before the JSON object.',
+      'Do not put the JSON inside <reasoning> tags. Do not use markdown fences.',
+      'The JSON object must use exactly one of these shapes:',
       '{"type":"tool_call","tool":"read_file","input":{"path":"relative/path"},"explanation":"short reason"}',
       '{"type":"final","response":"final user-facing answer"}',
       'Available local tools:',
@@ -821,7 +1026,12 @@ export class ChatSessionService {
       '- Use write_file to replace full file contents when needed.',
       '- Use append_file to add content to the end of a file.',
       '- Use replace_in_file for precise local edits, but only after you know the exact old_text currently in the file.',
+      '- Use remove_lines_in_file for requests like remove/delete line 3. Never use delete_file for line edits.',
+      '- Use replace_lines_in_file for requests that replace a complete line or range of lines.',
       '- Use insert_in_file when you need to place new text around an existing anchor, at a specific line_number, or at position start/end, without rewriting the whole file.',
+      '- For insert_in_file, put the inserted string in text. Include needed leading/trailing spaces or newlines so prose does not run together.',
+      '- For requests like after/before the first sentence in Markdown, ignore headings such as # Title; use the first prose sentence as anchor_text.',
+      '- Use move_text_in_file, not insert_in_file, when the user asks to move/reposition existing text or when an exact standalone snippet already exists and the request sounds like placing it somewhere else. If spacing needs to change, put the original text in source_text and the destination text, including spaces/newlines, in text.',
       '- If the user says after/before specific text on a specific line, pass both line_number and anchor_text with position before/after so the anchor is matched only on that line.',
       '- Use create_directory before writing into a new folder.',
       '- Use move_file, copy_file, and delete_file for actual filesystem operations instead of simulating them with edits.',
@@ -830,6 +1040,7 @@ export class ChatSessionService {
       '- If the user refers to a file informally or without a clear path, locate it first with find_files, read_directory, or path_exists before assuming it is at the workspace root.',
       '- Use git_show, git_add, git_commit, and git_checkout only when the user explicitly asked for git operations.',
       '- For commit history questions, prefer git_log first.',
+      '- When answering about the last/latest commit, include the changed files from git_log output as workspace file links when they are present.',
       '- To inspect a specific commit or learn which files changed in a commit, prefer git_show or git_diff with a specific revspec/commit instead of a full workspace diff.',
       '- If the user asks which files a commit changed, prefer a name-only or summary-style git inspection before requesting a full patch.',
       '- If an edit tool fails because required input is missing or the target text is not found, inspect the file and try again with a better tool input.',
@@ -872,6 +1083,112 @@ export class ChatSessionService {
     );
   }
 
+  isEditRequest(message = '') {
+    return /\b(add|insert|write|append|replace|remove|delete|move|relocate|reposition|put|place|change|edit|update)\b/i.test(String(message || ''));
+  }
+
+  finalResponseClaimsSuccess(response = '') {
+    return /\b(successfully|has been|have been|done|updated|inserted|added|removed|deleted|replaced|moved|changed|edited|wrote|written)\b/i.test(String(response || ''))
+      && !this.finalResponseAcknowledgesToolFailure(response);
+  }
+
+  hasSuccessfulMutatingTool(toolHistory = []) {
+    return toolHistory.some((step) => ChatSessionService.MUTATING_TOOL_NAMES.has(String(step?.tool || '').trim()) && step?.result?.ok === true);
+  }
+
+  buildMaxStepFallbackMessage(toolHistory = []) {
+    const successfulMutation = [...toolHistory]
+      .reverse()
+      .find((step) => ChatSessionService.MUTATING_TOOL_NAMES.has(String(step?.tool || '').trim()) && step?.result?.ok === true);
+    if (successfulMutation) {
+      const result = successfulMutation.result && typeof successfulMutation.result === 'object' ? successfulMutation.result : {};
+      const path = String(result.path || successfulMutation.input?.path || '').trim();
+      const lineNumber = Number.parseInt(String(result.line_number || ''), 10) || 0;
+      const target = path
+        ? `${path}${lineNumber > 0 ? ` (line ${lineNumber})` : ''}`
+        : 'the requested file';
+      return `I completed the ${successfulMutation.tool} change in ${target}, but the planner ran out of follow-up steps before producing a polished final response.`;
+    }
+
+    const latestStep = toolHistory.length ? toolHistory[toolHistory.length - 1] : null;
+    if (latestStep?.result?.ok === false) {
+      return `The planner ran out of steps after ${latestStep.tool} failed: ${latestStep.result?.error || 'Tool execution failed.'}`;
+    }
+
+    if (latestStep) {
+      return `The planner ran out of steps after running ${latestStep.tool}. No additional changes were applied after that step.`;
+    }
+
+    return 'The planner ran out of steps before it could complete the request.';
+  }
+
+  shouldFinalizeAfterSuccessfulTool(message = '', step = {}, toolHistory = []) {
+    const toolName = String(step?.tool || '').trim();
+    if (step?.result?.ok !== true || !ChatSessionService.MUTATING_TOOL_NAMES.has(toolName)) {
+      return false;
+    }
+
+    const userText = String(message || '');
+    const moveIntent = /\b(move|relocate|reposition)\b/i.test(userText);
+    if (!moveIntent) {
+      return this.isEditRequest(userText);
+    }
+
+    if (toolName === 'move_text_in_file') {
+      return true;
+    }
+
+    if (toolName === 'insert_in_file') {
+      return toolHistory
+        .slice(0, -1)
+        .some((previous) => ChatSessionService.MUTATING_TOOL_NAMES.has(String(previous?.tool || '').trim()) && previous?.result?.ok === true);
+    }
+
+    return false;
+  }
+
+  getAutoFinalMessageAfterSuccessfulTool(message = '', toolHistory = [], requestedInsertLineTarget = null, requestedSentenceTarget = null) {
+    const latestStep = toolHistory.length ? toolHistory[toolHistory.length - 1] : null;
+    if (!this.shouldFinalizeAfterSuccessfulTool(message, latestStep, toolHistory)) {
+      return '';
+    }
+
+    if (this.getMismatchedLineTargetedInsert(toolHistory, requestedInsertLineTarget)) {
+      return '';
+    }
+
+    if (this.getMismatchedSentenceTargetedInsert(toolHistory, requestedSentenceTarget)) {
+      return '';
+    }
+
+    return this.buildSuccessfulToolFinalMessage(latestStep);
+  }
+
+  buildSuccessfulToolFinalMessage(step = {}) {
+    const toolName = String(step?.tool || 'tool').trim();
+    const result = step.result && typeof step.result === 'object' ? step.result : {};
+    const path = String(result.path || step.input?.path || '').trim();
+    const lineNumber = Number.parseInt(String(result.line_number || ''), 10) || 0;
+    const target = path
+      ? `${path}${lineNumber > 0 ? ` (line ${lineNumber})` : ''}`
+      : 'the requested file';
+
+    if (toolName === 'move_text_in_file') {
+      return `Moved the text in ${target}.`;
+    }
+    if (toolName === 'insert_in_file' || toolName === 'append_file') {
+      return `Added the text in ${target}.`;
+    }
+    if (toolName === 'remove_lines_in_file') {
+      return `Removed the requested line in ${target}.`;
+    }
+    if (toolName === 'replace_in_file' || toolName === 'replace_lines_in_file') {
+      return `Updated ${target}.`;
+    }
+
+    return `Completed ${toolName} in ${target}.`;
+  }
+
   extractRequestedInsertLineTarget(session, message = '') {
     const userTexts = [
       String(message || ''),
@@ -901,9 +1218,12 @@ export class ChatSessionService {
 
       const numericMatch = value.match(/\b(?:line|line\s*number|line\s*#|#)\s*#?\s*(\d+)\b/i);
       const ordinalMatch = value.match(/\b(first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth)\s+line\b/i);
+      const numericOrdinalMatch = value.match(/\b(\d+)(?:st|nd|rd|th)\s+line\b/i);
       const lineNumber = numericMatch
         ? Number.parseInt(numericMatch[1], 10)
-        : (ordinalMatch ? ordinalWords.get(String(ordinalMatch[1] || '').toLowerCase()) : 0);
+        : (numericOrdinalMatch
+          ? Number.parseInt(numericOrdinalMatch[1], 10)
+          : (ordinalMatch ? ordinalWords.get(String(ordinalMatch[1] || '').toLowerCase()) : 0));
       if (!lineNumber || lineNumber < 1) {
         continue;
       }
@@ -925,8 +1245,59 @@ export class ChatSessionService {
     return null;
   }
 
+  extractRequestedRemoveLineTarget(session, message = '') {
+    const userTexts = [
+      String(message || ''),
+      ...(Array.isArray(session?.messages) ? [...session.messages].reverse()
+        .filter((entry) => String(entry?.role || '').toLowerCase() === 'user')
+        .map((entry) => String(entry?.text || '')) : []),
+    ];
+    const ordinalWords = new Map([
+      ['first', 1],
+      ['second', 2],
+      ['third', 3],
+      ['fourth', 4],
+      ['fifth', 5],
+      ['sixth', 6],
+      ['seventh', 7],
+      ['eighth', 8],
+      ['ninth', 9],
+      ['tenth', 10],
+    ]);
+
+    for (const text of userTexts) {
+      const value = String(text || '').trim();
+      if (!/\b(remove|delete|drop|clear)\b/i.test(value) || !/\bline\b/i.test(value)) {
+        continue;
+      }
+
+      const numericMatch = value.match(/\b(?:line|line\s*number|line\s*#|#)\s*#?\s*(\d+)\b/i);
+      const ordinalMatch = value.match(/\b(first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth)\s+line\b/i);
+      const numericOrdinalMatch = value.match(/\b(\d+)(?:st|nd|rd|th)\s+line\b/i);
+      const lineNumber = numericMatch
+        ? Number.parseInt(numericMatch[1], 10)
+        : (numericOrdinalMatch
+          ? Number.parseInt(numericOrdinalMatch[1], 10)
+          : (ordinalMatch ? ordinalWords.get(String(ordinalMatch[1] || '').toLowerCase()) : 0));
+      if (!lineNumber || lineNumber < 1) {
+        continue;
+      }
+
+      const countMatch = value.match(/\b(?:remove|delete|drop|clear)\s+(\d+)\s+lines?\b/i)
+        || value.match(/\b(\d+)\s+lines?\s+(?:from|starting)\b/i);
+      const count = countMatch ? Math.max(1, Number.parseInt(countMatch[1], 10) || 1) : 1;
+      return {
+        lineNumber,
+        count,
+      };
+    }
+
+    return null;
+  }
+
   normalizeLineTargetedInsertInput(toolName, input = {}, lineTarget = null) {
-    if (String(toolName || '').trim() !== 'insert_in_file' || !lineTarget?.lineNumber) {
+    const normalizedToolName = String(toolName || '').trim();
+    if (!['insert_in_file', 'move_text_in_file'].includes(normalizedToolName) || !lineTarget?.lineNumber) {
       return input && typeof input === 'object' ? input : {};
     }
 
@@ -937,12 +1308,235 @@ export class ChatSessionService {
     };
   }
 
+  normalizeLineRemovalDecision(session, message = '', decision = {}, lineTarget = null) {
+    if (!lineTarget?.lineNumber || String(decision?.tool || '').trim() !== 'delete_file') {
+      return decision;
+    }
+
+    const input = decision.input && typeof decision.input === 'object' ? decision.input : {};
+    const activeFile = this.getContextActiveFile(session);
+    return {
+      ...decision,
+      tool: 'remove_lines_in_file',
+      input: {
+        path: String(input.path || activeFile?.path || '').trim(),
+        line_number: lineTarget.lineNumber,
+        count: lineTarget.count || 1,
+      },
+      explanation: decision.explanation || 'Remove requested line(s) without deleting the file.',
+    };
+  }
+
+  extractRequestedSentenceTarget(session, message = '') {
+    const userTexts = [
+      String(message || ''),
+      ...(Array.isArray(session?.messages) ? [...session.messages].reverse()
+        .filter((entry) => String(entry?.role || '').toLowerCase() === 'user')
+        .map((entry) => String(entry?.text || '')) : []),
+    ];
+    const ordinalWords = new Map([
+      ['first', 1],
+      ['second', 2],
+      ['third', 3],
+      ['fourth', 4],
+      ['fifth', 5],
+      ['sixth', 6],
+      ['seventh', 7],
+      ['eighth', 8],
+      ['ninth', 9],
+      ['tenth', 10],
+    ]);
+
+    for (const text of userTexts) {
+      const value = String(text || '').trim();
+      const match = value.match(/\b(before|after)\s+(?:the\s+)?(?:(first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth)|(\d+)(?:st|nd|rd|th)?)\s+sentence\b/i)
+        || value.match(/\b(?:(first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth)|(\d+)(?:st|nd|rd|th)?)\s+sentence\b.*?\b(before|after)\b/i);
+      if (!match) {
+        continue;
+      }
+
+      const position = String(match[1] || match[6] || 'after').toLowerCase() === 'before' ? 'before' : 'after';
+      const ordinalWord = String(match[2] || match[4] || '').toLowerCase();
+      const numericValue = Number.parseInt(String(match[3] || match[5] || ''), 10) || 0;
+      const sentenceNumber = ordinalWord ? ordinalWords.get(ordinalWord) : numericValue;
+      if (sentenceNumber && sentenceNumber > 0) {
+        return {
+          sentenceNumber,
+          position,
+          newLine: /\b(new line|own line|line below|below)\b/i.test(value),
+        };
+      }
+    }
+
+    return null;
+  }
+
+  getLatestReadFileResult(toolHistory = [], path = '') {
+    const requestedPath = String(path || '').trim().replaceAll('\\', '/').toLowerCase();
+    for (let index = toolHistory.length - 1; index >= 0; index -= 1) {
+      const step = toolHistory[index] || {};
+      if (String(step.tool || '').trim() !== 'read_file' || step.result?.ok !== true || typeof step.result?.content !== 'string') {
+        continue;
+      }
+      const resultPath = String(step.result?.path || step.input?.path || '').trim().replaceAll('\\', '/').toLowerCase();
+      if (!requestedPath || !resultPath || requestedPath === resultPath || resultPath.endsWith(`/${requestedPath}`)) {
+        return step.result;
+      }
+    }
+    return null;
+  }
+
+  findProseSentence(content = '', sentenceNumber = 1) {
+    const target = Math.max(1, Number.parseInt(String(sentenceNumber || ''), 10) || 1);
+    const lines = String(content || '').split(/\r?\n/);
+    let seen = 0;
+    let inFence = false;
+
+    for (let index = 0; index < lines.length; index += 1) {
+      const line = String(lines[index] || '');
+      const trimmed = line.trim();
+      if (/^```/.test(trimmed)) {
+        inFence = !inFence;
+        continue;
+      }
+      if (inFence || !trimmed || /^#{1,6}\s+/.test(trimmed) || /^[-*_]{3,}$/.test(trimmed)) {
+        continue;
+      }
+
+      const sentencePattern = /[^.!?:]+[.!?:](?=\s|$)/g;
+      let match;
+      while ((match = sentencePattern.exec(line)) !== null) {
+        const sentence = String(match[0] || '').trim();
+        if (!sentence) {
+          continue;
+        }
+        seen += 1;
+        if (seen === target) {
+          return {
+            text: sentence,
+            lineNumber: index + 1,
+          };
+        }
+      }
+    }
+
+    return null;
+  }
+
+  normalizeInsertedTextForSentence(input = {}, sentenceTarget = null) {
+    const record = input && typeof input === 'object' ? { ...input } : {};
+    const position = String(sentenceTarget?.position || '').trim().toLowerCase();
+    if (position !== 'after') {
+      return record;
+    }
+
+    const textKeys = ['text', 'content', 'insert_text', 'insertText'];
+    const key = textKeys.find((candidate) => Object.prototype.hasOwnProperty.call(record, candidate));
+    if (!key) {
+      return record;
+    }
+
+    const value = String(record[key] || '');
+    if (value && sentenceTarget?.newLine && !value.startsWith('\n')) {
+      record[key] = `\n${value.replace(/^\s+/, '')}`;
+    } else if (value && !/^\s/.test(value)) {
+      record[key] = ` ${value}`;
+    }
+    return record;
+  }
+
+  normalizeSentenceTargetedInput(toolName, input = {}, sentenceTarget = null, toolHistory = []) {
+    const normalizedToolName = String(toolName || '').trim();
+    if (!['insert_in_file', 'move_text_in_file'].includes(normalizedToolName) || !sentenceTarget?.sentenceNumber) {
+      return input && typeof input === 'object' ? input : {};
+    }
+
+    const record = input && typeof input === 'object' ? input : {};
+    const readResult = this.getLatestReadFileResult(toolHistory, record.path);
+    const sentence = this.findProseSentence(readResult?.content || '', sentenceTarget.sentenceNumber);
+    if (!sentence?.text) {
+      return record;
+    }
+
+    return this.normalizeInsertedTextForSentence({
+      ...record,
+      path: record.path || readResult?.path,
+      anchor_text: sentence.text,
+      line_number: sentence.lineNumber,
+      position: sentenceTarget.position,
+    }, sentenceTarget);
+  }
+
+  needsReadBeforeSentenceTargetedEdit(toolName, input = {}, sentenceTarget = null, toolHistory = []) {
+    const normalizedToolName = String(toolName || '').trim();
+    if (!['insert_in_file', 'move_text_in_file'].includes(normalizedToolName) || !sentenceTarget?.sentenceNumber) {
+      return false;
+    }
+
+    const record = input && typeof input === 'object' ? input : {};
+    const readResult = this.getLatestReadFileResult(toolHistory, record.path);
+    return !this.findProseSentence(readResult?.content || '', sentenceTarget.sentenceNumber);
+  }
+
+  normalizeMoveIntentDecision(message = '', decision = {}, toolHistory = []) {
+    const userText = String(message || '');
+    const moveIntent = /\b(move|relocate|reposition)\b/i.test(userText);
+    const correctionPlacementIntent = /\b(i meant|actually|instead|put it|place it|should be)\b/i.test(userText)
+      && /\b(new line|own line|below|above|before|after)\b/i.test(userText);
+    if (String(decision?.tool || '').trim() !== 'insert_in_file' || (!moveIntent && !correctionPlacementIntent)) {
+      return decision;
+    }
+
+    const input = decision.input && typeof decision.input === 'object' ? decision.input : {};
+    const insertedText = String(
+      Object.prototype.hasOwnProperty.call(input, 'text') ? input.text
+        : Object.prototype.hasOwnProperty.call(input, 'content') ? input.content
+          : Object.prototype.hasOwnProperty.call(input, 'insert_text') ? input.insert_text
+            : Object.prototype.hasOwnProperty.call(input, 'insertText') ? input.insertText
+              : '',
+    );
+    const sourceText = insertedText.trim();
+    if (!sourceText) {
+      return decision;
+    }
+
+    const readResult = this.getLatestReadFileResult(toolHistory, input.path);
+    const content = String(readResult?.content || '');
+    if (!content.includes(sourceText)) {
+      return decision;
+    }
+    const sourcePattern = new RegExp(`(^|\\n|[ \\t])${this.escapeRegExp(sourceText)}(?=\\s|$)`, 'm');
+    const sourceMatch = content.match(sourcePattern);
+    const resolvedSourceText = sourceMatch
+      ? String(sourceMatch[0] || '').replace(/^\n/, '')
+      : sourceText;
+
+    return {
+      ...decision,
+      tool: 'move_text_in_file',
+      input: {
+        ...input,
+        source_text: input.source_text || input.sourceText || resolvedSourceText,
+        text: insertedText,
+      },
+      explanation: decision.explanation || 'Move the existing text instead of inserting a duplicate.',
+    };
+  }
+
+  escapeRegExp(value = '') {
+    return String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  }
+
   normalizeContextualPathInput(session, message = '', toolName = '', input = {}) {
     const normalizedToolName = String(toolName || '').trim();
     const pathTools = new Set([
       'read_file',
       'search_text',
+      'file_search',
       'insert_in_file',
+      'move_text_in_file',
+      'replace_lines_in_file',
+      'remove_lines_in_file',
       'replace_in_file',
       'append_file',
       'stat_file',
@@ -960,8 +1554,14 @@ export class ChatSessionService {
     }
 
     const userText = String(message || '').toLowerCase();
-    const placeholderPath = /^(?:file|current-file|current_file|active-file|active_file|document|doc|untitled)(?:\.[a-z0-9_-]+)?$/i.test(requestedPath);
+    const placeholderPath = /^(?:file|current-file|current_file|active-file|active_file|document|doc|untitled|relative\/path|path\/to\/file|relative-path)(?:\.[a-z0-9_-]+)?$/i.test(requestedPath);
     const currentFileRequest = /\b(current|active|open|visible|editor|this)\b/.test(userText) || userText.includes('# ');
+    if (placeholderPath) {
+      return {
+        ...record,
+        path: activeFile.path,
+      };
+    }
     if ((!requestedPath || placeholderPath) && currentFileRequest) {
       return {
         ...record,
@@ -994,19 +1594,87 @@ export class ChatSessionService {
     return null;
   }
 
+  getMismatchedSentenceTargetedInsert(toolHistory = [], sentenceTarget = null) {
+    if (!sentenceTarget?.sentenceNumber) {
+      return null;
+    }
+
+    for (let index = toolHistory.length - 1; index >= 0; index -= 1) {
+      const step = toolHistory[index] || {};
+      if (!['insert_in_file', 'move_text_in_file'].includes(String(step.tool || '').trim()) || step.result?.ok !== true) {
+        continue;
+      }
+
+      const resultLine = Number.parseInt(String(step.result?.line_number || ''), 10) || 0;
+      const path = String(step.input?.path || step.result?.path || '').trim();
+      const readResult = this.getLatestReadFileResult(toolHistory.slice(0, index), path);
+      const sentence = this.findProseSentence(readResult?.content || '', sentenceTarget.sentenceNumber);
+      if (sentence?.lineNumber && resultLine && resultLine !== sentence.lineNumber) {
+        return {
+          step,
+          expectedLine: sentence.lineNumber,
+        };
+      }
+      return null;
+    }
+
+    return null;
+  }
+
   validateBridgeToolInput(toolName, input = {}) {
     const normalizedToolName = String(toolName || '').trim();
     const record = input && typeof input === 'object' ? input : {};
 
     if (normalizedToolName === 'replace_in_file') {
+      const hasOldText = Object.prototype.hasOwnProperty.call(record, 'old_text')
+        || Object.prototype.hasOwnProperty.call(record, 'oldText')
+        || Object.prototype.hasOwnProperty.call(record, 'old');
+      const hasNewText = Object.prototype.hasOwnProperty.call(record, 'new_text')
+        || Object.prototype.hasOwnProperty.call(record, 'newText')
+        || Object.prototype.hasOwnProperty.call(record, 'new')
+        || Object.prototype.hasOwnProperty.call(record, 'new_content')
+        || Object.prototype.hasOwnProperty.call(record, 'newContent')
+        || Array.isArray(record.new_lines)
+        || Array.isArray(record.newLines);
       if (!String(record.path || '').trim()) {
         return 'replace_in_file requires a path.';
       }
-      if (!String(record.old_text || '')) {
-        return 'replace_in_file requires old_text. Read the file first, then retry with exact old_text and new_text.';
+      if (!hasOldText || !String(record.old_text ?? record.oldText ?? record.old ?? '')) {
+        return 'replace_in_file requires old_text (or old). Read the file first, then retry with exact old_text and new_text.';
       }
-      if (!Object.prototype.hasOwnProperty.call(record, 'new_text')) {
-        return 'replace_in_file requires new_text.';
+      if (!hasNewText) {
+        return 'replace_in_file requires new_text (or new).';
+      }
+    }
+
+    if (normalizedToolName === 'replace_lines_in_file') {
+      const lineNumber = Number.parseInt(String(record.line_number || record.lineNumber || record.line || record.start_line || record.startLine || ''), 10) || 0;
+      const hasText = Object.prototype.hasOwnProperty.call(record, 'text')
+        || Object.prototype.hasOwnProperty.call(record, 'content')
+        || Object.prototype.hasOwnProperty.call(record, 'new_text')
+        || Object.prototype.hasOwnProperty.call(record, 'newText')
+        || Object.prototype.hasOwnProperty.call(record, 'new_content')
+        || Object.prototype.hasOwnProperty.call(record, 'newContent')
+        || Array.isArray(record.new_lines)
+        || Array.isArray(record.newLines);
+      if (!String(record.path || '').trim()) {
+        return 'replace_lines_in_file requires a path.';
+      }
+      if (lineNumber <= 0) {
+        return 'replace_lines_in_file requires line_number (or start_line).';
+      }
+      if (!hasText) {
+        return 'replace_lines_in_file requires text (or content, new_text, new_content, new_lines).';
+      }
+    }
+
+    if (normalizedToolName === 'remove_lines_in_file') {
+      const lineNumber = Number.parseInt(String(record.line_number || record.lineNumber || record.line || record.start_line || record.startLine || ''), 10) || 0;
+      if (!String(record.path || '').trim()) {
+        return 'remove_lines_in_file requires a path.';
+      }
+      if (lineNumber <= 0) {
+        return 'remove_lines_in_file requires line_number (or start_line).';
       }
     }
 
@@ -1050,8 +1718,45 @@ export class ChatSessionService {
       if (!anchorText && !insertsAtBoundary && lineNumber <= 0) {
         return 'insert_in_file requires anchor_text (or anchorText, anchor, search_text), line_number, or position start/end.';
       }
-      if (!Object.prototype.hasOwnProperty.call(record, 'text')) {
-        return 'insert_in_file requires text.';
+      const hasText = Object.prototype.hasOwnProperty.call(record, 'text')
+        || Object.prototype.hasOwnProperty.call(record, 'content')
+        || Object.prototype.hasOwnProperty.call(record, 'insert_text')
+        || Object.prototype.hasOwnProperty.call(record, 'insertText');
+      if (!hasText) {
+        return 'insert_in_file requires text (or content, insert_text, insertText).';
+      }
+    }
+
+    if (normalizedToolName === 'move_text_in_file') {
+      const hasExplicitPosition = Object.prototype.hasOwnProperty.call(record, 'position')
+        || Object.prototype.hasOwnProperty.call(record, 'location');
+      const rawAnchorHint = String(record.anchor || record.anchorText || record.search_text || '').trim().toLowerCase();
+      const rawPosition = String(
+        record.position
+        || record.location
+        || (!Object.prototype.hasOwnProperty.call(record, 'anchor_text') && ['start', 'beginning', 'top', 'end', 'bottom'].includes(rawAnchorHint) ? rawAnchorHint : '')
+      ).trim().toLowerCase();
+      const insertsAtBoundary = ['start', 'beginning', 'top', 'end', 'bottom'].includes(rawPosition);
+      const lineNumber = Number.parseInt(String(record.line_number || record.lineNumber || record.line || ''), 10) || 0;
+      const anchorText = String(
+        record.anchor_text
+        || (hasExplicitPosition ? (record.anchorText || record.anchor || record.search_text) : (!insertsAtBoundary ? (record.anchorText || record.anchor || record.search_text) : ''))
+        || '',
+      );
+      const hasText = Object.prototype.hasOwnProperty.call(record, 'text')
+        || Object.prototype.hasOwnProperty.call(record, 'content')
+        || Object.prototype.hasOwnProperty.call(record, 'insert_text')
+        || Object.prototype.hasOwnProperty.call(record, 'insertText')
+        || Object.prototype.hasOwnProperty.call(record, 'source_text')
+        || Object.prototype.hasOwnProperty.call(record, 'sourceText');
+      if (!String(record.path || '').trim()) {
+        return 'move_text_in_file requires a path.';
+      }
+      if (!hasText) {
+        return 'move_text_in_file requires text (or content, insert_text, insertText).';
+      }
+      if (!anchorText && !insertsAtBoundary && lineNumber <= 0) {
+        return 'move_text_in_file requires anchor_text (or anchorText, anchor, search_text), line_number, or position start/end.';
       }
     }
 
@@ -1105,8 +1810,20 @@ export class ChatSessionService {
       return 'search_text requires a query.';
     }
 
+    if (normalizedToolName === 'file_search') {
+      const hasQuery = String(record.query || '').trim() !== '';
+      const hasPattern = String(record.pattern || '').trim() !== '';
+      if (!hasQuery && !hasPattern && !String(record.path || '').trim()) {
+        return 'file_search requires query, pattern, or path.';
+      }
+    }
+
     if (normalizedToolName === 'run_command' && !String(record.command || '').trim()) {
       return 'run_command requires a command.';
+    }
+
+    if (normalizedToolName === 'shell' && !String(record.command || '').trim()) {
+      return 'shell requires a command.';
     }
 
     if (normalizedToolName === 'apply_patch' && !String(record.patch || '').trim()) {
@@ -1257,10 +1974,26 @@ export class ChatSessionService {
     const toolHistory = [];
     const maxSteps = 10;
     const requestedInsertLineTarget = this.extractRequestedInsertLineTarget(session, message);
+    const requestedRemoveLineTarget = this.extractRequestedRemoveLineTarget(session, message);
+    const requestedSentenceTarget = this.extractRequestedSentenceTarget(session, message);
+    const plannerThinkingParts = [];
+    const recordPlannerThinking = (rawValue) => {
+      const split = this.splitReasoningContent(rawValue || '');
+      if (!split.thinking) {
+        return split;
+      }
+      plannerThinkingParts.push(split.thinking);
+      return split;
+    };
+    const getPlannerThinking = () => this.capThinkingText(plannerThinkingParts.join('\n\n'));
 
     try {
       this.logPlanner(session, `start message=${JSON.stringify(this.summarizePlannerText(message, 160))}`);
       for (let step = 0; step < maxSteps; step += 1) {
+        if (session.cancelRequested) {
+          throw new Error('Canceled by user.');
+        }
+
         const plannerPrompt = this.buildBridgeToolPlannerPrompt({
           session,
           message,
@@ -1269,6 +2002,7 @@ export class ChatSessionService {
         });
         this.logPlanner(session, `step=${step + 1}/${maxSteps} prompt_chars=${plannerPrompt.length} tool_history=${toolHistory.length}`);
         const assistantText = await this.runExecPrompt(session, plannerPrompt, step === 0 ? tempImagePaths : []);
+        recordPlannerThinking(assistantText);
         this.logPlanner(session, `step=${step + 1} raw=${JSON.stringify(this.summarizePlannerText(assistantText))}`);
         let decision = this.parseBridgePlannerResponse(assistantText);
 
@@ -1279,18 +2013,31 @@ export class ChatSessionService {
             this.buildBridgePlannerRepairPrompt(assistantText),
             [],
           );
+          recordPlannerThinking(repairedText);
           this.logPlanner(session, `step=${step + 1} repair_raw=${JSON.stringify(this.summarizePlannerText(repairedText))}`);
           decision = this.parseBridgePlannerResponse(repairedText);
+          if (!decision) {
+            this.logPlanner(session, `step=${step + 1} parse=failed json_only_retry=starting`);
+            const retryText = await this.runExecPrompt(
+              session,
+              this.buildBridgePlannerJsonOnlyRetryPrompt(repairedText || assistantText),
+              [],
+            );
+            recordPlannerThinking(retryText);
+            this.logPlanner(session, `step=${step + 1} json_only_retry_raw=${JSON.stringify(this.summarizePlannerText(retryText))}`);
+            decision = this.parseBridgePlannerResponse(retryText);
+          }
         }
 
         if (!decision) {
           this.logPlanner(session, `step=${step + 1} parse=failed_final_fallback`);
           const fallbackMessage = this.splitReasoningContent(assistantText.trim());
+          const fallbackThinking = getPlannerThinking();
           session.messages.push({
             id: randomUUID(),
             role: 'assistant',
             text: fallbackMessage.text || 'I could not normalize the model response into a tool action.',
-            thinking: fallbackMessage.thinking || undefined,
+            thinking: fallbackThinking || undefined,
             created_at: Date.now(),
           });
           session.status = 'idle';
@@ -1304,6 +2051,21 @@ export class ChatSessionService {
 
         if (decision.type === 'final') {
           this.logPlanner(session, `step=${step + 1} decision=final response=${JSON.stringify(this.summarizePlannerText(decision.response))}`);
+          if (this.isEditRequest(message) && this.finalResponseClaimsSuccess(decision.response) && !this.hasSuccessfulMutatingTool(toolHistory)) {
+            const guardError = 'Cannot claim success for an edit request because no mutating workspace tool succeeded in this turn.';
+            this.logPlanner(session, `step=${step + 1} final=rejected_without_successful_mutation error=${JSON.stringify(this.summarizePlannerText(guardError))}`);
+            toolHistory.push({
+              tool: 'planner_final_guard',
+              input: {
+                rejected_response: decision.response || '',
+              },
+              result: {
+                ok: false,
+                error: guardError,
+              },
+            });
+            continue;
+          }
           const unresolvedFailedMutation = this.getUnresolvedFailedMutatingTool(toolHistory);
           if (unresolvedFailedMutation && !this.finalResponseAcknowledgesToolFailure(decision.response)) {
             const guardError = `Cannot claim success because ${unresolvedFailedMutation.tool} failed: ${unresolvedFailedMutation.result?.error || 'Tool execution failed.'}`;
@@ -1336,12 +2098,29 @@ export class ChatSessionService {
             });
             continue;
           }
+          const mismatchedSentenceInsert = this.getMismatchedSentenceTargetedInsert(toolHistory, requestedSentenceTarget);
+          if (mismatchedSentenceInsert && !this.finalResponseAcknowledgesToolFailure(decision.response)) {
+            const guardError = `Cannot claim success because ${mismatchedSentenceInsert.step.tool} wrote line ${mismatchedSentenceInsert.step.result?.line_number || '(unknown)'}, but the requested sentence target is on line ${mismatchedSentenceInsert.expectedLine}.`;
+            this.logPlanner(session, `step=${step + 1} final=rejected_after_sentence_mismatch error=${JSON.stringify(this.summarizePlannerText(guardError))}`);
+            toolHistory.push({
+              tool: 'planner_final_guard',
+              input: {
+                rejected_response: decision.response || '',
+              },
+              result: {
+                ok: false,
+                error: guardError,
+              },
+            });
+            continue;
+          }
           const finalMessage = this.splitReasoningContent(decision.response || 'No response returned.');
+          const finalThinking = [getPlannerThinking(), finalMessage.thinking].filter(Boolean).join('\n\n').replace(/\n{3,}/g, '\n\n').trim();
           session.messages.push({
             id: randomUUID(),
             role: 'assistant',
             text: finalMessage.text || 'No response returned.',
-            thinking: finalMessage.thinking || undefined,
+            thinking: finalThinking || undefined,
             created_at: Date.now(),
           });
           session.status = 'idle';
@@ -1357,8 +2136,22 @@ export class ChatSessionService {
           throw new Error('Planner requested a tool step without naming a tool.');
         }
 
+        decision = this.normalizeLineRemovalDecision(session, message, decision, requestedRemoveLineTarget);
         decision.input = this.normalizeContextualPathInput(session, message, decision.tool, decision.input || {});
         decision.input = this.normalizeLineTargetedInsertInput(decision.tool, decision.input || {}, requestedInsertLineTarget);
+        if (this.needsReadBeforeSentenceTargetedEdit(decision.tool, decision.input || {}, requestedSentenceTarget, toolHistory)) {
+          const activeFile = this.getContextActiveFile(session);
+          decision = {
+            type: 'tool_call',
+            tool: 'read_file',
+            input: {
+              path: String(decision.input?.path || activeFile?.path || '').trim(),
+            },
+            explanation: 'Read the file before resolving the requested sentence target.',
+          };
+        }
+        decision.input = this.normalizeSentenceTargetedInput(decision.tool, decision.input || {}, requestedSentenceTarget, toolHistory);
+        decision = this.normalizeMoveIntentDecision(message, decision, toolHistory);
 
         this.logPlanner(
           session,
@@ -1373,6 +2166,9 @@ export class ChatSessionService {
           },
         });
         const toolResult = await this.executeBridgeTool(session, toolExecutor, decision.tool, decision.input || {});
+        if (session.cancelRequested) {
+          throw new Error('Canceled by user.');
+        }
         this.logPlanner(
           session,
           `step=${step + 1} tool_result tool=${decision.tool} ok=${toolResult?.ok === true} error=${JSON.stringify(toolResult?.error || '')}`,
@@ -1391,10 +2187,51 @@ export class ChatSessionService {
             result: toolResult,
           },
         });
+
+        const autoFinalMessage = this.getAutoFinalMessageAfterSuccessfulTool(
+          message,
+          toolHistory,
+          requestedInsertLineTarget,
+          requestedSentenceTarget,
+        );
+        if (autoFinalMessage) {
+          this.logPlanner(session, `step=${step + 1} auto_final=successful_tool tool=${decision.tool}`);
+          session.messages.push({
+            id: randomUUID(),
+            role: 'assistant',
+            text: autoFinalMessage,
+            thinking: getPlannerThinking() || undefined,
+            created_at: Date.now(),
+          });
+          session.status = 'idle';
+          session.running = false;
+          session.pendingApproval = null;
+          session.pendingApprovalResolver = null;
+          session.pendingAttachments = [];
+          session.updatedAt = Date.now();
+          this.publishSession(session, 'session.message');
+          this.publishSession(session, 'session.completed');
+          return session;
+        }
       }
 
       this.logPlanner(session, `error=max_steps_exceeded steps=${maxSteps}`);
-      throw new Error(`Bridge tool planner exceeded ${maxSteps} steps without returning a final answer.`);
+      session.messages.push({
+        id: randomUUID(),
+        role: 'assistant',
+        text: this.buildMaxStepFallbackMessage(toolHistory),
+        thinking: getPlannerThinking() || undefined,
+        created_at: Date.now(),
+      });
+      session.status = 'idle';
+      session.running = false;
+      session.pendingApproval = null;
+      session.pendingApprovalResolver = null;
+      session.pendingAttachments = [];
+      session.updatedAt = Date.now();
+      this.publishSession(session, 'session.message');
+      this.publishSession(session, 'session.completed');
+      return session;
     } catch (error) {
       this.logPlanner(session, `error=${JSON.stringify(error instanceof Error ? error.message : 'Bridge tool execution failed.')}`);
       session.status = 'error';

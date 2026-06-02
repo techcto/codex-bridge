@@ -5,6 +5,11 @@
   "version": "0.0.1",
   "publisher": "solodev",
   "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/techcto/codex-bridge.git",
+    "directory": "vscode-extension"
+  },
   "engines": {
     "vscode": "^1.90.0"
   },

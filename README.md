@@ -88,7 +88,7 @@ Codex Bridge now treats every backend as a `codex_agent` runtime, not a plain ch
 
 - `native_tools`: the runtime exposes Codex-style workspace tools directly, so file edits, command execution, and git inspection can happen natively
 - `model_tools`: the runtime depends on the selected upstream model supporting tool use correctly; this path is model-dependent and should be treated as experimental until verified
-- `bridge_tools`: the host app intends to augment the model with a bridge-side tool adapter; this is the right shape for regular chat models, but the edit adapter still needs to be implemented
+- `bridge_tools`: the host app augments regular chat models with a bridge-side planner/executor adapter that turns constrained model intent into verified local tool results
 
 The key rule is that model text is never the source of truth for workspace actions. A file edit, command run, or git inspection only counts as real when the bridge receives verified tool results from the runtime or from a future bridge-side adapter.
 
@@ -104,11 +104,42 @@ The planned local-first tool protocol covers bridge-executed actions such as:
 - `list_files`
 - `read_file`
 - `search_text`
+- `file_search`
+- `write_file`
+- `append_file`
+- `replace_in_file`
+- `replace_lines_in_file`
+- `remove_lines_in_file`
+- `insert_in_file`
+- `move_text_in_file`
+- `delete_file`
+- `create_directory`
+- `move_file`
+- `copy_file`
+- `path_exists`
+- `stat_file`
+- `read_directory`
+- `find_files`
+- `read_multiple_files`
+- `grep_structured`
 - `run_command`
+- `shell`
 - `git_status`
 - `git_log`
 - `git_diff`
+- `git_show`
+- `git_add`
+- `git_commit`
+- `git_checkout`
 - `apply_patch`
+
+For tool-capable remote models such as GPT-5.5, the bridge can export these local tools as OpenAI custom function tools:
+
+- `GET /runtime/tools?format=responses` returns Responses API `tools` entries such as `{ "type": "function", "name": "read_file", ... }`.
+- `GET /runtime/tools?format=chat_completions` returns Chat Completions `tools` entries such as `{ "type": "function", "function": { "name": "read_file", ... } }`.
+- `GET /runtime/tools?format=local` returns the provider-neutral local tool definitions.
+
+OpenAI hosted tool types such as `web_search`, hosted `file_search`, `computer_use`, `code_interpreter`, `image_generation`, `mcp`, and `tool_search` are separate from this local workspace protocol. The bridge provides local equivalents only where they map cleanly: `file_search` searches the workspace, and `shell` delegates to local command execution with approval.
 
 ### Bridge-Side Tool Adapter Notes
 

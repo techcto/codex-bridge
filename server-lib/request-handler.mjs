@@ -1,4 +1,11 @@
 import { URL } from 'node:url';
+import {
+  getLocalToolDefinitions,
+  getOpenAIChatCompletionsLocalTools,
+  getOpenAIResponsesLocalTools,
+  OPENAI_HOSTED_TOOL_TYPES,
+  validateLocalToolDefinitionNames,
+} from './local-tools.mjs';
 
 export function createBridgeRequestHandler(deps) {
   return async function handleBridgeRequest(request, response) {
@@ -59,6 +66,27 @@ export function createBridgeRequestHandler(deps) {
         service: 'codex-bridge',
         ...deps.getRuntimeInfo(),
       });
+    }
+
+    if (url.pathname === '/runtime/tools' && request.method === 'GET') {
+      const format = String(url.searchParams.get('format') || 'responses').trim().toLowerCase();
+      const toolNameErrors = validateLocalToolDefinitionNames();
+      const localTools = getLocalToolDefinitions();
+      const tools = format === 'local'
+        ? localTools
+        : (format === 'chat' || format === 'chat_completions' || format === 'chat-completions')
+          ? getOpenAIChatCompletionsLocalTools()
+          : getOpenAIResponsesLocalTools();
+
+      return deps.sendJson(request, response, {
+        ok: toolNameErrors.length === 0,
+        service: 'codex-bridge',
+        format,
+        local_tool_count: localTools.length,
+        hosted_openai_tool_types: OPENAI_HOSTED_TOOL_TYPES,
+        tool_name_errors: toolNameErrors,
+        tools,
+      }, toolNameErrors.length ? 500 : 200);
     }
 
     if (url.pathname === '/chat/sessions' && request.method === 'POST') {
@@ -154,6 +182,19 @@ export function createBridgeRequestHandler(deps) {
           bridge_load: deps.chatSessionService.getBridgeLoad(),
         }, statusCode);
       }
+    }
+
+    const cancelMatch = url.pathname.match(/^\/chat\/sessions\/([a-f0-9-]+)\/cancel$/i);
+    if (cancelMatch && request.method === 'POST') {
+      const session = deps.chatSessionService.cancelSession(cancelMatch[1]);
+      if (!session) {
+        return deps.sendJson(request, response, { ok: false, error: 'Session not found' }, 404);
+      }
+
+      return deps.sendJson(request, response, {
+        ok: true,
+        session: deps.chatSessionService.serializeSession(session),
+      }, 202);
     }
 
     const approvalMatch = url.pathname.match(/^\/chat\/sessions\/([a-f0-9-]+)\/approvals$/i);
