@@ -154,6 +154,7 @@ export type LocalChatMessage = {
   id: string;
   role: LocalChatMessageRole;
   content: string;
+  attachments?: WebviewAttachment[];
   thinking?: string;
   createdAt: number;
 };

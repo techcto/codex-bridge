@@ -189,6 +189,7 @@ function activateApp(context: vscode.ExtensionContext): void {
     getStoredOsirusActiveOrgName,
     getThreadScopeKey,
     hasOsirusAccountSession,
+    hasSavedApiKey,
     normalizeRole: normalizeOsirusHistoryRole,
     outputChannel: bridgeOutputChannel,
     preferOsirusProductOption,
@@ -285,7 +286,11 @@ function activateApp(context: vscode.ExtensionContext): void {
   });
 
   context.subscriptions.push(
-    vscode.window.registerWebviewViewProvider('codexBridge.sidebar', sidebarProvider),
+    vscode.window.registerWebviewViewProvider('codexBridge.sidebar', sidebarProvider, {
+      webviewOptions: {
+        retainContextWhenHidden: true,
+      },
+    }),
     vscode.commands.registerCommand('codexBridge.configure', async () => {
       await configureConnection();
     }),

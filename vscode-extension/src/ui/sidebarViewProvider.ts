@@ -141,6 +141,7 @@ export class CodexBridgeSidebarProvider implements vscode.WebviewViewProvider {
         if (this.view) {
           void this.view.webview.postMessage({ type: 'error', value: detail });
         }
+        void this.refresh();
       }
     });
 

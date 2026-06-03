@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process';
 import { copyFile, mkdir, mkdtemp, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import { basename, dirname, extname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 export const LOCAL_TOOL_DEFINITIONS = [
@@ -80,6 +80,24 @@ export const LOCAL_TOOL_DEFINITIONS = [
         content: { type: 'string' },
       },
       required: ['path', 'content'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'save_attachment',
+    description: 'Save a pasted/uploaded chat attachment into the workspace so project files can reference it.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        path: { type: 'string' },
+        attachment_index: { type: 'integer' },
+        attachmentIndex: { type: 'integer' },
+        attachment_id: { type: 'string' },
+        attachmentId: { type: 'string' },
+        name: { type: 'string' },
+        overwrite: { type: 'boolean' },
+      },
+      required: ['path'],
       additionalProperties: false,
     },
   },
@@ -1008,6 +1026,19 @@ const MAX_LIST_FILES_LIMIT = 5000;
 const DEFAULT_SEARCH_TEXT_FILE_LIMIT = 1000;
 const DEFAULT_SEARCH_TEXT_MATCH_LIMIT = 200;
 const MAX_SEARCH_TEXT_FILE_BYTES = 2 * 1024 * 1024;
+const MAX_READ_FILE_BYTES = 2 * 1024 * 1024;
+const BINARY_FILE_EXTENSIONS = new Set([
+  '.avif',
+  '.bmp',
+  '.gif',
+  '.ico',
+  '.jpeg',
+  '.jpg',
+  '.pdf',
+  '.png',
+  '.webp',
+  '.zip',
+]);
 const LIST_FILES_SKIPPED_DIRECTORIES = new Set([
   '.git',
   '.hg',
@@ -1043,6 +1074,19 @@ function splitToolOutputLines(output = '') {
 
 function escapeRegExp(value = '') {
   return String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function isLikelyBinaryPath(filePath = '') {
+  return BINARY_FILE_EXTENSIONS.has(extname(String(filePath || '')).toLowerCase());
+}
+
+function assertReadableTextFile(filePath, details) {
+  if (isLikelyBinaryPath(filePath)) {
+    throw new Error(`read_file cannot read binary/image file '${basename(filePath)}' as text. Use the attachment/image path directly or save_attachment for project assets.`);
+  }
+  if (details?.size > MAX_READ_FILE_BYTES) {
+    throw new Error(`read_file output is too large (${details.size} bytes). Use search_text, grep_structured, or a narrower file.`);
+  }
 }
 
 function globPatternToRegExp(pattern = '') {
@@ -1407,8 +1451,9 @@ async function resolveExistingWorkspaceFile(workspaceRoot, requestedPath = '') {
 }
 
 export class LocalToolExecutor {
-  constructor({ workspaceRoot }) {
+  constructor({ workspaceRoot, attachments = [] }) {
     this.workspaceRoot = resolve(workspaceRoot);
+    this.attachments = Array.isArray(attachments) ? attachments : [];
   }
 
   getToolDefinitions() {
@@ -1429,6 +1474,8 @@ export class LocalToolExecutor {
         return this.writeFile(input);
       case 'append_file':
         return this.appendFile(input);
+      case 'save_attachment':
+        return this.saveAttachment(input);
       case 'replace_in_file':
         return this.replaceInFile(input);
       case 'replace_lines_in_file':
@@ -1536,6 +1583,8 @@ export class LocalToolExecutor {
     }
     const resolvedFile = await resolveExistingWorkspaceFile(this.workspaceRoot, relativePath);
     const filePath = resolvedFile.absolutePath;
+    const details = await stat(filePath);
+    assertReadableTextFile(filePath, details);
     const content = await readFile(filePath, 'utf8');
     return {
       ok: true,
@@ -1651,6 +1700,78 @@ export class LocalToolExecutor {
       path: resolvedFile.relativePath,
       line_number: lineNumber,
       bytes_written: Buffer.byteLength(content, 'utf8'),
+    };
+  }
+
+  getAttachmentInput(input = {}) {
+    const attachments = Array.isArray(this.attachments) ? this.attachments : [];
+    if (!attachments.length) {
+      throw new Error('save_attachment requires at least one current chat attachment.');
+    }
+
+    const requestedName = String(input.name || '').trim();
+    if (requestedName) {
+      const byName = attachments.find((attachment) => String(attachment?.name || '').trim() === requestedName);
+      if (byName) {
+        return byName;
+      }
+    }
+
+    const requestedIndex = Number.parseInt(String(input.attachment_index || input.attachmentIndex || '1'), 10) || 1;
+    const attachment = attachments[requestedIndex - 1];
+    if (!attachment) {
+      throw new Error(`save_attachment could not find attachment #${requestedIndex}.`);
+    }
+    return attachment;
+  }
+
+  decodeAttachmentDataUrl(attachment = {}) {
+    const dataUrl = String(attachment?.data_url || attachment?.dataUrl || '').trim();
+    const match = dataUrl.match(/^data:([^;]+);base64,(.+)$/);
+    if (!match) {
+      throw new Error('save_attachment requires a base64 data URL attachment.');
+    }
+
+    return {
+      mimeType: String(match[1] || '').trim(),
+      bytes: Buffer.from(match[2], 'base64'),
+    };
+  }
+
+  async saveAttachment(input = {}) {
+    const requestedPath = String(input.path || '').trim();
+    if (!requestedPath) {
+      throw new Error('save_attachment requires a path.');
+    }
+
+    const attachment = this.getAttachmentInput(input);
+    const decoded = this.decodeAttachmentDataUrl(attachment);
+    const originalName = String(attachment?.name || '').trim();
+    const originalExtension = extname(originalName);
+    const targetRelativePath = !extname(requestedPath) && originalExtension
+      ? `${requestedPath}${originalExtension}`
+      : requestedPath;
+    const filePath = resolveWorkspacePath(this.workspaceRoot, targetRelativePath);
+    if (input.overwrite !== true) {
+      try {
+        await stat(filePath);
+        throw new Error(`save_attachment target already exists: ${targetRelativePath}. Use overwrite true or choose a new path.`);
+      } catch (error) {
+        if (error?.code !== 'ENOENT') {
+          throw error;
+        }
+      }
+    }
+    await mkdir(dirname(filePath), { recursive: true });
+    await writeFile(filePath, decoded.bytes);
+
+    return {
+      ok: true,
+      tool: 'save_attachment',
+      path: relative(this.workspaceRoot, filePath).replaceAll('\\', '/'),
+      attachment_name: originalName || undefined,
+      mime_type: decoded.mimeType,
+      bytes_written: decoded.bytes.length,
     };
   }
 
@@ -2014,6 +2135,8 @@ export class LocalToolExecutor {
 
     const files = await Promise.all(paths.map(async (relativePath) => {
       const filePath = resolveWorkspacePath(this.workspaceRoot, relativePath);
+      const details = await stat(filePath);
+      assertReadableTextFile(filePath, details);
       const content = await readFile(filePath, 'utf8');
       return {
         path: relativePath,

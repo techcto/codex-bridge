@@ -30,6 +30,7 @@ export type ChatPanelStateServiceDeps = {
   getStoredOsirusActiveOrgName: () => Promise<string>;
   getThreadScopeKey: (provider: RuntimeProvider) => Promise<string>;
   hasOsirusAccountSession: () => Promise<boolean>;
+  hasSavedApiKey: () => Promise<boolean>;
   mapBridgeSessionMessagesToLocal?: never;
   normalizeRole: (value: unknown) => 'user' | 'assistant' | 'system' | null;
   outputChannel?: { appendLine(value: string): void };
@@ -102,11 +103,13 @@ export class ChatPanelStateService {
     }
 
     const hasOsirusSession = runtimeProvider === 'osirus' && await this.deps.hasOsirusAccountSession();
-    if (!hasOsirusSession) {
+    const hasOsirusApiKey = runtimeProvider === 'osirus' && await this.deps.hasSavedApiKey();
+    const canLoadOsirusModels = runtimeProvider === 'osirus' && (hasOsirusSession || hasOsirusApiKey);
+    if (!canLoadOsirusModels) {
       this.cachedOsirusModels = null;
     }
 
-    if (runtimeProvider === 'osirus' && hasOsirusSession) {
+    if (canLoadOsirusModels) {
       try {
         osirusModels = await this.getCachedOsirusModels(storedActiveOrgId);
         this.deps.outputChannel?.appendLine(`[bridge] chat state resolved osirus models=${osirusModels.length}`);
@@ -130,7 +133,7 @@ export class ChatPanelStateService {
             osirusChatId: storedOpenOsirusChatId,
           });
         }
-        if (refreshedThread.osirusChatId) {
+        if (hasOsirusSession && refreshedThread.osirusChatId) {
           let snapshot: OsirusChatSnapshot | null = null;
           try {
             snapshot = await this.deps.fetchOsirusChatSnapshot(refreshedThread.osirusChatId);

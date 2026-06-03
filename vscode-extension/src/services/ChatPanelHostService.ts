@@ -80,6 +80,7 @@ export class ChatPanelHostService {
         });
       } catch (error) {
         activePanel.webview.postMessage({ type: 'error', value: this.deps.getErrorMessage(error) });
+        await this.deps.pushPanelState();
       }
     }, null, this.deps.context.subscriptions);
 

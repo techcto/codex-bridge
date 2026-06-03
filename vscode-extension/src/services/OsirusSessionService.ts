@@ -260,7 +260,15 @@ export class OsirusSessionService {
         }
       } else if (locallySelectedOrgId) {
         const token = String(options?.tokenOverride || '').trim() || await this.getValidAccessToken();
-        const resolvedOrgId = await this.setActiveOrg(token, locallySelectedOrgId);
+        let resolvedOrgId = '';
+        try {
+          resolvedOrgId = await this.setActiveOrg(token, locallySelectedOrgId);
+        } catch (error) {
+          if (this.isAuthError(error)) {
+            await this.clearExpiredAccountSession('active org sync failed');
+          }
+          throw error;
+        }
         if (resolvedOrgId && resolvedOrgId !== storedOrgId) {
           await this.setStoredActiveOrg(resolvedOrgId, storedOrgName || resolvedOrgId);
         }
@@ -273,13 +281,31 @@ export class OsirusSessionService {
     }
 
     const token = String(options?.tokenOverride || '').trim() || await this.getValidAccessToken();
-    const memberships = await this.fetchOrgMemberships(token);
+    let memberships: OsirusOrgMembership[] = [];
+    try {
+      memberships = await this.fetchOrgMemberships(token);
+    } catch (error) {
+      if (this.isAuthError(error)) {
+        await this.clearExpiredAccountSession('org membership load failed');
+        throw new Error('Your Osirus.AI account session expired. Sign in again from the sidebar.');
+      }
+      throw error;
+    }
     if (!memberships.length) {
       await this.clearStoredActiveOrg();
       throw new Error('Your Osirus account does not have any active organizations yet.');
     }
 
-    const serverActiveOrgId = await this.getActiveOrgId(token);
+    let serverActiveOrgId = '';
+    try {
+      serverActiveOrgId = await this.getActiveOrgId(token);
+    } catch (error) {
+      if (this.isAuthError(error)) {
+        await this.clearExpiredAccountSession('active org lookup failed');
+        throw new Error('Your Osirus.AI account session expired. Sign in again from the sidebar.');
+      }
+      throw error;
+    }
 
     let selectedMembership: OsirusOrgMembership | undefined;
     if (memberships.length === 1) {
@@ -317,7 +343,15 @@ export class OsirusSessionService {
 
     const selectedOrgId = selectedMembership.orgId;
     if (selectedOrgId && selectedOrgId !== serverActiveOrgId) {
-      await this.setActiveOrg(token, selectedOrgId);
+      try {
+        await this.setActiveOrg(token, selectedOrgId);
+      } catch (error) {
+        if (this.isAuthError(error)) {
+          await this.clearExpiredAccountSession('active org update failed');
+          throw new Error('Your Osirus.AI account session expired. Sign in again from the sidebar.');
+        }
+        throw error;
+      }
       this.outputChannel?.appendLine(`[bridge] set active Osirus org to ${selectedOrgId}`);
     }
 
@@ -558,6 +592,22 @@ export class OsirusSessionService {
   private async clearAuthTokens(): Promise<void> {
     await this.context.secrets.delete(OSIRUS_ACCESS_TOKEN_SECRET_KEY);
     await this.context.secrets.delete(OSIRUS_REFRESH_TOKEN_SECRET_KEY);
+  }
+
+  private isAuthError(error: unknown): boolean {
+    const message = this.getErrorMessage(error).toLowerCase();
+    return message.includes('401') || message.includes('403') || message.includes('expired') || message.includes('invalid refresh token');
+  }
+
+  private async clearExpiredAccountSession(reason: string): Promise<void> {
+    await this.clearAuthTokens();
+    await this.clearStoredActiveOrg();
+    await this.clearOpenChatState();
+    this.outputChannel?.appendLine(`[bridge] cleared stale Osirus account session after ${reason}`);
+    this.refreshSidebar();
+    try {
+      await this.pushChatPanelState();
+    } catch (_error) {}
   }
 
   private async setStoredActiveOrg(orgId: string, orgName?: string): Promise<void> {

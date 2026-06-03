@@ -548,7 +548,7 @@ export function buildSidebarHtml(): string {
       border-top: 1px solid var(--line);
     }
     .footer-meta {
-      display: flex;
+      display: none;
       align-items: center;
       justify-content: flex-start;
       gap: 8px;
@@ -558,11 +558,12 @@ export function buildSidebarHtml(): string {
       display: flex;
       align-items: center;
       justify-content: flex-start;
-      min-width: 220px;
-      flex: 0 1 300px;
+      min-width: 0;
+      flex: 0 1 60%;
+      max-width: 60%;
     }
     select {
-      min-width: 180px;
+      min-width: 0;
       width: 100%;
       border-radius: 10px;
       border: 1px solid var(--line);
@@ -583,18 +584,71 @@ export function buildSidebarHtml(): string {
       align-items: center;
       gap: 6px;
       max-width: 100%;
-      padding: 6px 9px;
-      border-radius: 999px;
+      min-height: 32px;
+      padding: 4px 8px 4px 4px;
+      border-radius: 8px;
       border: 1px solid var(--line);
       background: var(--panel-2);
       color: var(--text);
       font-size: 11px;
+    }
+    .attachment-thumb {
+      width: 28px;
+      height: 28px;
+      flex: 0 0 28px;
+      border-radius: 6px;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      background: var(--panel);
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--muted);
+      font-size: 10px;
+      font-weight: 700;
+    }
+    .attachment-thumb img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      display: block;
+    }
+    .attachment-name {
+      min-width: 0;
+      max-width: 180px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
     }
     .attachment-chip button {
       background: transparent;
       color: var(--muted);
       padding: 0;
       width: auto;
+    }
+    .message-attachments {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-top: 8px;
+    }
+    .message-attachment {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      max-width: 220px;
+      padding: 3px 7px 3px 3px;
+      border-radius: 8px;
+      border: 1px solid rgba(255,255,255,0.12);
+      background: rgba(255,255,255,0.05);
+      color: inherit;
+      font-size: 11px;
+    }
+    .message-attachment .attachment-thumb {
+      width: 48px;
+      height: 36px;
+      flex-basis: 48px;
+      border-radius: 5px;
     }
     textarea {
       width: 100%;
@@ -613,6 +667,28 @@ export function buildSidebarHtml(): string {
       justify-content: space-between;
       gap: 8px;
     }
+    .composer-tools {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      min-width: 0;
+      flex: 1 1 auto;
+    }
+    .composer-tools .model-wrap {
+      margin-left: auto;
+    }
+    @media (max-width: 360px) {
+      .composer-actions {
+        align-items: flex-end;
+      }
+      .composer-tools {
+        flex-wrap: wrap;
+      }
+      .model-wrap {
+        flex-basis: 100%;
+        max-width: 100%;
+      }
+    }
     .ghost-button,
     .send-button {
       border-radius: 999px;
@@ -624,13 +700,46 @@ export function buildSidebarHtml(): string {
       color: var(--text);
     }
     .send-button {
-      background: linear-gradient(135deg, var(--accent), color-mix(in srgb, var(--accent) 60%, #79c0ff));
-      color: var(--accent-text);
+      background: #ffffff;
+      color: #050505;
       font-weight: 700;
+      width: 38px;
+      height: 38px;
+      min-width: 38px;
+      min-height: 38px;
+      flex: 0 0 38px;
+      aspect-ratio: 1 / 1;
+      padding: 0;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
     }
     .send-button.stop-button {
-      background: var(--error);
-      color: #ffffff;
+      background: #ffffff;
+      color: #050505;
+    }
+    .send-button svg {
+      width: 18px;
+      height: 18px;
+      stroke: currentColor;
+      stroke-width: 3;
+      fill: none;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+      pointer-events: none;
+    }
+    .send-button .stop-icon {
+      fill: currentColor;
+      stroke: currentColor;
+    }
+    .send-button .stop-icon {
+      display: none;
+    }
+    .send-button.stop-button .send-icon {
+      display: none;
+    }
+    .send-button.stop-button .stop-icon {
+      display: block;
     }
     .approval-overlay {
       position: fixed;
@@ -771,21 +880,28 @@ export function buildSidebarHtml(): string {
       <div id="messages" class="messages content-view" hidden></div>
       <div id="status" class="status"></div>
       <form id="composer" class="composer">
-        <div id="footerMeta" class="footer-meta">
-          <div id="modelWrap" class="model-wrap" hidden>
-            <select id="modelSelect" aria-label="Select model">
-              <option value="">Loading models...</option>
-            </select>
-          </div>
-        </div>
+        <div id="footerMeta" class="footer-meta"></div>
         <div id="attachmentList" class="composer-attachments"></div>
         <textarea id="prompt" placeholder="Ask Codex Bridge about the current file or workspace..."></textarea>
         <div class="composer-actions">
-          <div>
+          <div class="composer-tools">
             <input id="attachmentInput" type="file" multiple hidden>
             <button id="attachButton" class="ghost-button" type="button">Attach</button>
+            <div id="modelWrap" class="model-wrap" hidden>
+              <select id="modelSelect" aria-label="Select model">
+                <option value="">Loading models...</option>
+              </select>
+            </div>
           </div>
-          <button id="sendButton" class="send-button" type="submit">Send</button>
+          <button id="sendButton" class="send-button" type="submit" title="Send" aria-label="Send">
+            <svg class="send-icon" viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M5 12h14"></path>
+              <path d="m13 6 6 6-6 6"></path>
+            </svg>
+            <svg class="stop-icon" viewBox="0 0 24 24" aria-hidden="true">
+              <rect x="7" y="7" width="10" height="10" rx="1"></rect>
+            </svg>
+          </button>
         </div>
       </form>
     </section>
@@ -862,7 +978,8 @@ export function buildSidebarHtml(): string {
     let assistantRunning = false;
     let lastProgressMessage = '';
     let pendingAssistantCompleted = false;
-    let viewMode = 'list';
+    const persistedUiState = vscode.getState && vscode.getState() || {};
+    let viewMode = persistedUiState && persistedUiState.viewMode === 'detail' ? 'detail' : 'list';
     let didAutoEnterDetail = false;
     let state = {
       signedIn: false,
@@ -931,7 +1048,8 @@ export function buildSidebarHtml(): string {
       if (sessionId !== undefined) {
         activeSessionId = String(sessionId || '');
       }
-      sendButton.textContent = assistantRunning ? 'Stop' : 'Send';
+      sendButton.title = assistantRunning ? 'Stop' : 'Send';
+      sendButton.setAttribute('aria-label', assistantRunning ? 'Stop' : 'Send');
       sendButton.classList.toggle('stop-button', assistantRunning);
     }
 
@@ -954,6 +1072,7 @@ export function buildSidebarHtml(): string {
 
     function showListView() {
       viewMode = 'list';
+      persistUiState();
       closeHistoryMenu();
       threadList.hidden = false;
       messagesNode.hidden = true;
@@ -966,6 +1085,7 @@ export function buildSidebarHtml(): string {
 
     function showDetailView() {
       viewMode = 'detail';
+      persistUiState();
       closeHistoryMenu();
       threadList.hidden = true;
       messagesNode.hidden = false;
@@ -974,6 +1094,15 @@ export function buildSidebarHtml(): string {
       backButton.hidden = false;
       historyToggle.hidden = false;
       chatHeaderTitle.textContent = String(state.activeThreadTitle || 'Chat');
+    }
+
+    function persistUiState() {
+      try {
+        vscode.setState({
+          viewMode: viewMode,
+          activeThreadId: String(state.activeThreadId || ''),
+        });
+      } catch (_error) {}
     }
 
     function createThinkingMeta(messageMeta, thinkingText, thinkingToggle, thinkingPanel) {
@@ -1054,9 +1183,38 @@ export function buildSidebarHtml(): string {
       }
       const body = document.createElement('div');
       body.className = 'message-body';
-      safeRenderRichContent(body, String(content || ''));
+      const messageAttachments = Array.isArray(config.attachments) ? config.attachments : [];
+      const bodyContent = messageAttachments.length && isAttachmentPlaceholder(content) ? '' : String(content || '');
+      if (bodyContent.trim()) {
+        safeRenderRichContent(body, bodyContent);
+      }
+      renderMessageAttachments(body, config.attachments);
       node.appendChild(body);
       return node;
+    }
+
+    function isAttachmentPlaceholder(value) {
+      return /^\s*\[Attachments?\]\s+/i.test(String(value || ''));
+    }
+
+    function renderMessageAttachments(target, items) {
+      const messageAttachments = Array.isArray(items) ? items : [];
+      if (!messageAttachments.length) {
+        return;
+      }
+
+      const wrap = document.createElement('div');
+      wrap.className = 'message-attachments';
+      for (const attachment of messageAttachments) {
+        const item = document.createElement('div');
+        item.className = 'message-attachment';
+        item.title = String(attachment && attachment.name || 'Attachment');
+        item.innerHTML =
+          renderAttachmentThumb(attachment) +
+          '<span class="attachment-name">' + escapeHtml(attachment && attachment.name || 'Attachment') + '</span>';
+        wrap.appendChild(item);
+      }
+      target.appendChild(wrap);
     }
 
     function renderPlainTextContent(target, text) {
@@ -1337,19 +1495,22 @@ export function buildSidebarHtml(): string {
         const thinkingText = item && typeof item.thinking === 'string'
           ? String(item.thinking || '')
           : '';
+        const itemAttachments = Array.isArray(item && item.attachments) ? item.attachments : [];
         if (!content.trim() && normalizedRole === 'assistant' && thinkingText) {
           content = 'Codex returned internal reasoning without a final reply.';
         }
-        if (!content.trim()) {
+        if (!content.trim() && !itemAttachments.length) {
           continue;
         }
-        messagesNode.appendChild(createMessageNode(normalizedRole, content, normalizedRole === 'assistant'
+        const messageOptions = normalizedRole === 'assistant'
           ? {
               metaText: thinkingText ? 'Thought' : '',
               showSpinner: false,
               thinkingText,
             }
-          : undefined));
+          : {};
+        messageOptions.attachments = itemAttachments;
+        messagesNode.appendChild(createMessageNode(normalizedRole, content, messageOptions));
       }
 
       messagesNode.scrollTop = messagesNode.scrollHeight;
@@ -1453,7 +1614,8 @@ export function buildSidebarHtml(): string {
         const chip = document.createElement('div');
         chip.className = 'attachment-chip';
         chip.innerHTML =
-          '<span>' + escapeHtml(attachment.name || 'Attachment') + '</span>' +
+          renderAttachmentThumb(attachment) +
+          '<span class="attachment-name">' + escapeHtml(attachment.name || 'Attachment') + '</span>' +
           '<button type="button">x</button>';
         chip.querySelector('button').addEventListener('click', function() {
           attachments = attachments.filter(function(item) {
@@ -1463,6 +1625,15 @@ export function buildSidebarHtml(): string {
         });
         attachmentList.appendChild(chip);
       }
+    }
+
+    function renderAttachmentThumb(attachment) {
+      const mimeType = String(attachment && attachment.mimeType || '').toLowerCase();
+      const dataUrl = String(attachment && attachment.dataUrl || '');
+      if (mimeType.indexOf('image/') === 0 && dataUrl) {
+        return '<span class="attachment-thumb"><img src="' + escapeHtml(dataUrl) + '" alt=""></span>';
+      }
+      return '<span class="attachment-thumb">' + escapeHtml(getAttachmentExtension(mimeType).slice(0, 3).toUpperCase()) + '</span>';
     }
 
     function renderApprovalPrompt(payload) {
@@ -1494,19 +1665,89 @@ export function buildSidebarHtml(): string {
       });
     }
 
-    async function addAttachments(fileList) {
+    function getAttachmentExtension(mimeType) {
+      const value = String(mimeType || '').toLowerCase();
+      if (value === 'image/png') {
+        return 'png';
+      }
+      if (value === 'image/jpeg' || value === 'image/jpg') {
+        return 'jpg';
+      }
+      if (value === 'image/gif') {
+        return 'gif';
+      }
+      if (value === 'image/webp') {
+        return 'webp';
+      }
+      if (value === 'text/plain') {
+        return 'txt';
+      }
+      return 'bin';
+    }
+
+    function getAttachmentName(file, index, source) {
+      const explicitName = String(file && file.name || '').trim();
+      if (explicitName) {
+        return explicitName;
+      }
+      const prefix = source === 'paste' ? 'pasted-attachment' : 'attachment';
+      return prefix + '-' + String(index + 1) + '.' + getAttachmentExtension(file && file.type);
+    }
+
+    async function addAttachments(fileList, source) {
       const files = Array.from(fileList || []);
       for (const file of files.slice(0, Math.max(0, 6 - attachments.length))) {
         const dataUrl = await fileToDataUrl(file);
         attachments.push({
           id: makeAttachmentId(),
-          name: String(file.name || 'attachment'),
+          name: getAttachmentName(file, attachments.length, source),
           mimeType: String(file.type || 'application/octet-stream'),
           size: Number(file.size || 0),
           dataUrl: dataUrl,
         });
       }
       renderAttachments();
+    }
+
+    function getClipboardAttachmentFiles(event) {
+      const clipboardData = event && event.clipboardData;
+      if (!clipboardData) {
+        return [];
+      }
+
+      const directFiles = Array.from(clipboardData.files || []).filter(Boolean);
+      if (directFiles.length) {
+        return directFiles;
+      }
+
+      return Array.from(clipboardData.items || [])
+        .filter(function(item) {
+          return item && item.kind === 'file';
+        })
+        .map(function(item) {
+          return item.getAsFile();
+        })
+        .filter(Boolean);
+    }
+
+    async function handleAttachmentPaste(event) {
+      const files = getClipboardAttachmentFiles(event);
+      if (!files.length) {
+        return;
+      }
+
+      event.preventDefault();
+      if (attachments.length >= 6) {
+        setStatus('Attachment limit reached.', true);
+        return;
+      }
+
+      try {
+        await addAttachments(files, 'paste');
+        setStatus(files.length === 1 ? 'Pasted attachment.' : 'Pasted attachments.', false);
+      } catch (error) {
+        setStatus(error && error.message ? error.message : 'Unable to paste attachment.', true);
+      }
     }
 
     function describeAttachments(items) {
@@ -1538,6 +1779,8 @@ export function buildSidebarHtml(): string {
       if (!signedIn) {
         didAutoEnterDetail = false;
         showListView();
+      } else if (viewMode === 'detail' && state.activeThreadId) {
+        showDetailView();
       } else if (!wasSignedIn && signedIn && !didAutoEnterDetail) {
         showListView();
       }
@@ -1589,7 +1832,7 @@ export function buildSidebarHtml(): string {
 
       const agentRuntime = state.agentRuntime && typeof state.agentRuntime === 'object' ? state.agentRuntime : {};
       modelWrap.hidden = runtimeProvider !== 'osirus';
-      footerMeta.hidden = !signedIn;
+      footerMeta.hidden = true;
 
       renderModelOptions(state.osirusModels || [], state.selectedOsirusModelId || '');
       renderThreads();
@@ -1833,6 +2076,7 @@ export function buildSidebarHtml(): string {
       nextMessages.push({
         role: 'user',
         content: promptValue || describeAttachments(nextAttachments),
+        attachments: nextAttachments,
       });
       showDetailView();
       renderMessages(nextMessages);
@@ -1960,9 +2204,17 @@ export function buildSidebarHtml(): string {
       target.value = '';
     });
 
+    form.addEventListener('paste', function(event) {
+      void handleAttachmentPaste(event);
+    });
+
     renderAttachments();
     renderModelOptions([], '');
-    showListView();
+    if (viewMode === 'detail') {
+      showDetailView();
+    } else {
+      showListView();
+    }
     setStatus('Requesting chat state...', false);
     postToExtension({ type: 'ready' });
   </script>

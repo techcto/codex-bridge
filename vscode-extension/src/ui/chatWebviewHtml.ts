@@ -416,13 +416,27 @@ export function getChatWebviewHtml(): string {
       align-self: end;
       border: 0;
       border-radius: 999px;
-      padding: 0 18px;
+      padding: 0;
+      width: 44px;
       min-height: 44px;
       font: inherit;
       font-weight: 600;
-      background: linear-gradient(135deg, var(--accent), var(--accent-2));
-      color: #08111f;
+      background: #ffffff;
+      color: #050505;
       cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+    }
+    button.primary svg {
+      width: 18px;
+      height: 18px;
+      stroke: currentColor;
+      stroke-width: 3;
+      fill: none;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+      pointer-events: none;
     }
     .composer-attachments {
       grid-column: 1 / -1;
@@ -439,12 +453,41 @@ export function getChatWebviewHtml(): string {
       align-items: center;
       gap: 8px;
       max-width: 100%;
-      padding: 8px 10px;
-      border-radius: 999px;
+      min-height: 34px;
+      padding: 4px 9px 4px 4px;
+      border-radius: 8px;
       border: 1px solid var(--line);
       background: rgba(17, 24, 45, 0.92);
       color: var(--text);
       font-size: 12px;
+    }
+    .attachment-thumb {
+      width: 30px;
+      height: 30px;
+      flex: 0 0 30px;
+      border-radius: 6px;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      background: rgba(255,255,255,0.04);
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--muted);
+      font-size: 10px;
+      font-weight: 700;
+    }
+    .attachment-thumb img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      display: block;
+    }
+    .attachment-name {
+      min-width: 0;
+      max-width: 220px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
     }
     .attachment-chip button {
       width: auto;
@@ -455,6 +498,30 @@ export function getChatWebviewHtml(): string {
       border: 0;
       cursor: pointer;
       font: inherit;
+    }
+    .message-attachments {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 7px;
+      margin-top: 10px;
+    }
+    .message-attachment {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      max-width: 260px;
+      padding: 3px 8px 3px 3px;
+      border-radius: 8px;
+      border: 1px solid rgba(255,255,255,0.14);
+      background: rgba(255,255,255,0.06);
+      color: inherit;
+      font-size: 12px;
+    }
+    .message-attachment .attachment-thumb {
+      width: 58px;
+      height: 42px;
+      flex-basis: 58px;
+      border-radius: 5px;
     }
     .composer-actions {
       grid-column: 1 / -1;
@@ -608,7 +675,12 @@ export function getChatWebviewHtml(): string {
           </div>
         </div>
         <textarea id="prompt" placeholder="Ask Codex Bridge about the current file or workspace..."></textarea>
-        <button class="primary" type="submit">Send</button>
+        <button class="primary" type="submit" title="Send" aria-label="Send">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M5 12h14"></path>
+            <path d="m13 6 6 6-6 6"></path>
+          </svg>
+        </button>
       </form>
     </main>
     <aside class="context">
@@ -767,14 +839,42 @@ export function getChatWebviewHtml(): string {
       document.getElementById('historyButton').textContent = historyOpen ? '×' : '☰';
     }
 
-    function createMessageNode(role, content) {
+    function createMessageNode(role, content, options) {
+      const config = options && typeof options === 'object' ? options : {};
       const node = document.createElement('div');
       node.className = 'message ' + role;
       const body = document.createElement('div');
       body.className = 'message-body';
-      body.textContent = String(content || '');
+      const messageAttachments = Array.isArray(config.attachments) ? config.attachments : [];
+      const bodyContent = messageAttachments.length && isAttachmentPlaceholder(content) ? '' : String(content || '');
+      body.textContent = bodyContent;
+      renderMessageAttachments(body, config.attachments);
       node.appendChild(body);
       return node;
+    }
+
+    function isAttachmentPlaceholder(value) {
+      return /^\s*\[Attachments?\]\s+/i.test(String(value || ''));
+    }
+
+    function renderMessageAttachments(target, items) {
+      const messageAttachments = Array.isArray(items) ? items : [];
+      if (!messageAttachments.length) {
+        return;
+      }
+
+      const wrap = document.createElement('div');
+      wrap.className = 'message-attachments';
+      for (const attachment of messageAttachments) {
+        const item = document.createElement('div');
+        item.className = 'message-attachment';
+        item.title = String(attachment && attachment.name || 'Attachment');
+        item.innerHTML =
+          renderAttachmentThumb(attachment) +
+          '<span class="attachment-name">' + escapeHtml(attachment && attachment.name || 'Attachment') + '</span>';
+        wrap.appendChild(item);
+      }
+      target.appendChild(wrap);
     }
 
     function renderMessages(list) {
@@ -794,10 +894,13 @@ export function getChatWebviewHtml(): string {
         const role = String(item && item.role || '').toLowerCase();
         const normalizedRole = role === 'user' || role === 'assistant' || role === 'system' ? role : 'assistant';
         const content = String(item && (item.content || item.text) || '');
-        if (!content.trim()) {
+        const itemAttachments = Array.isArray(item && item.attachments) ? item.attachments : [];
+        if (!content.trim() && !itemAttachments.length) {
           continue;
         }
-        messagesNode.appendChild(createMessageNode(normalizedRole, content));
+        messagesNode.appendChild(createMessageNode(normalizedRole, content, {
+          attachments: itemAttachments,
+        }));
       }
 
       messagesNode.scrollTop = messagesNode.scrollHeight;
@@ -900,7 +1003,8 @@ export function getChatWebviewHtml(): string {
         const chip = document.createElement('div');
         chip.className = 'attachment-chip';
         chip.innerHTML =
-          '<span>' + escapeHtml(attachment.name || 'Attachment') + '</span>' +
+          renderAttachmentThumb(attachment) +
+          '<span class="attachment-name">' + escapeHtml(attachment.name || 'Attachment') + '</span>' +
           '<button type="button">×</button>';
         chip.querySelector('button').addEventListener('click', function() {
           attachments = attachments.filter(function(item) {
@@ -910,6 +1014,15 @@ export function getChatWebviewHtml(): string {
         });
         attachmentList.appendChild(chip);
       }
+    }
+
+    function renderAttachmentThumb(attachment) {
+      const mimeType = String(attachment && attachment.mimeType || '').toLowerCase();
+      const dataUrl = String(attachment && attachment.dataUrl || '');
+      if (mimeType.indexOf('image/') === 0 && dataUrl) {
+        return '<span class="attachment-thumb"><img src="' + escapeHtml(dataUrl) + '" alt=""></span>';
+      }
+      return '<span class="attachment-thumb">' + escapeHtml(getAttachmentExtension(mimeType).slice(0, 3).toUpperCase()) + '</span>';
     }
 
     function renderApprovalPrompt(payload) {
@@ -941,19 +1054,89 @@ export function getChatWebviewHtml(): string {
       });
     }
 
-    async function addAttachments(fileList) {
+    function getAttachmentExtension(mimeType) {
+      const value = String(mimeType || '').toLowerCase();
+      if (value === 'image/png') {
+        return 'png';
+      }
+      if (value === 'image/jpeg' || value === 'image/jpg') {
+        return 'jpg';
+      }
+      if (value === 'image/gif') {
+        return 'gif';
+      }
+      if (value === 'image/webp') {
+        return 'webp';
+      }
+      if (value === 'text/plain') {
+        return 'txt';
+      }
+      return 'bin';
+    }
+
+    function getAttachmentName(file, index, source) {
+      const explicitName = String(file && file.name || '').trim();
+      if (explicitName) {
+        return explicitName;
+      }
+      const prefix = source === 'paste' ? 'pasted-attachment' : 'attachment';
+      return prefix + '-' + String(index + 1) + '.' + getAttachmentExtension(file && file.type);
+    }
+
+    async function addAttachments(fileList, source) {
       const files = Array.from(fileList || []);
       for (const file of files.slice(0, Math.max(0, 6 - attachments.length))) {
         const dataUrl = await fileToDataUrl(file);
         attachments.push({
           id: makeAttachmentId(),
-          name: String(file.name || 'attachment'),
+          name: getAttachmentName(file, attachments.length, source),
           mimeType: String(file.type || 'application/octet-stream'),
           size: Number(file.size || 0),
           dataUrl: dataUrl,
         });
       }
       renderAttachments();
+    }
+
+    function getClipboardAttachmentFiles(event) {
+      const clipboardData = event && event.clipboardData;
+      if (!clipboardData) {
+        return [];
+      }
+
+      const directFiles = Array.from(clipboardData.files || []).filter(Boolean);
+      if (directFiles.length) {
+        return directFiles;
+      }
+
+      return Array.from(clipboardData.items || [])
+        .filter(function(item) {
+          return item && item.kind === 'file';
+        })
+        .map(function(item) {
+          return item.getAsFile();
+        })
+        .filter(Boolean);
+    }
+
+    async function handleAttachmentPaste(event) {
+      const files = getClipboardAttachmentFiles(event);
+      if (!files.length) {
+        return;
+      }
+
+      event.preventDefault();
+      if (attachments.length >= 6) {
+        setStatus('Attachment limit reached.', true);
+        return;
+      }
+
+      try {
+        await addAttachments(files, 'paste');
+        setStatus(files.length === 1 ? 'Pasted attachment.' : 'Pasted attachments.', false);
+      } catch (error) {
+        setStatus(error && error.message ? error.message : 'Unable to paste attachment.', true);
+      }
     }
 
     function describeAttachments(items) {
@@ -1073,6 +1256,7 @@ export function getChatWebviewHtml(): string {
       nextMessages.push({
         role: 'user',
         content: promptValue || describeAttachments(nextAttachments),
+        attachments: nextAttachments,
       });
       renderMessages(nextMessages);
 
@@ -1148,6 +1332,10 @@ export function getChatWebviewHtml(): string {
       const target = event.target;
       await addAttachments(target.files);
       target.value = '';
+    });
+
+    form.addEventListener('paste', function(event) {
+      void handleAttachmentPaste(event);
     });
 
     historyRail.classList.remove('hidden');

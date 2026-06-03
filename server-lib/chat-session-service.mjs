@@ -17,11 +17,12 @@ export class ChatSessionService {
     this.pendingTurnQueue = [];
   }
 
-  static MAX_INLINE_EXEC_PROMPT_CHARS = 12000;
+  static MAX_INLINE_EXEC_PROMPT_CHARS = 6000;
   static MAX_THINKING_CHARS = 12000;
   static MUTATING_TOOL_NAMES = new Set([
     'write_file',
     'append_file',
+    'save_attachment',
     'replace_in_file',
     'replace_lines_in_file',
     'remove_lines_in_file',
@@ -55,6 +56,51 @@ export class ChatSessionService {
       return text;
     }
     return `${text.slice(0, maxChars)}...`;
+  }
+
+  buildCodexExitErrorMessage(code, stderr = '', stdout = '', assistantText = '') {
+    const stderrText = String(stderr || '').trim();
+    if (stderrText) {
+      return stderrText;
+    }
+
+    const assistant = String(assistantText || '').trim();
+    if (assistant) {
+      return `Codex exited with code ${code ?? 1}: ${this.summarizePlannerText(assistant, 800)}`;
+    }
+
+    const stdoutText = String(stdout || '').trim();
+    if (stdoutText) {
+      return `Codex exited with code ${code ?? 1}: ${this.summarizePlannerText(stdoutText, 1200)}`;
+    }
+
+    return `Codex exited with code ${code ?? 1}`;
+  }
+
+  stringifyPlannerToolValue(value, maxChars = 12000) {
+    const seen = new WeakSet();
+    const json = JSON.stringify(value, (key, nestedValue) => {
+      if (typeof nestedValue === 'string') {
+        if (/^(dataUrl|data_url|content|output|stdout|stderr)$/i.test(key) && nestedValue.length > 6000) {
+          return `${nestedValue.slice(0, 6000)}\n...[truncated ${nestedValue.length - 6000} chars]`;
+        }
+        if (nestedValue.length > 20000) {
+          return `${nestedValue.slice(0, 20000)}\n...[truncated ${nestedValue.length - 20000} chars]`;
+        }
+      }
+      if (nestedValue && typeof nestedValue === 'object') {
+        if (seen.has(nestedValue)) {
+          return '[Circular]';
+        }
+        seen.add(nestedValue);
+      }
+      return nestedValue;
+    });
+    const text = String(json || '');
+    if (text.length <= maxChars) {
+      return text;
+    }
+    return `${text.slice(0, maxChars)}\n...[truncated ${text.length - maxChars} chars]`;
   }
 
   getBridgeLoad() {
@@ -122,7 +168,51 @@ export class ChatSessionService {
     return normalizeAgentRuntimeContext(session?.context?.agent_runtime || {});
   }
 
-  shouldUseBridgeToolLoop(session) {
+  hasPendingImageAttachments(session) {
+    return (Array.isArray(session?.pendingAttachments) ? session.pendingAttachments : [])
+      .some((attachment) => /^image\//i.test(String(attachment?.mimeType || attachment?.mime_type || '')));
+  }
+
+  shouldUseDirectVisionAnswer(session, message = '') {
+    if (!this.hasPendingImageAttachments(session)) {
+      return false;
+    }
+
+    const text = String(message || '').trim();
+    if (!text) {
+      return false;
+    }
+
+    const wantsHtmlFromImage = /\b(convert|recreate|turn|generate|make|build|code)\b[\s\S]*\b(image|screenshot|mockup|design|hero)\b[\s\S]*\b(html|bootstrap|css|page|website)\b/i.test(text)
+      || /\b(image|screenshot|mockup|design|hero)\b[\s\S]*\b(to|into|as)\b[\s\S]*\b(html|bootstrap|css|page|website)\b/i.test(text);
+    if (!wantsHtmlFromImage) {
+      return false;
+    }
+
+    return !/\b(update|edit|write|save|create|replace|insert|add|change|modify)\b[\s\S]*\b(file|index|html|workspace|project|repo|open file|current file)\b/i.test(text);
+  }
+
+  isWorkspaceToolRequest(message = '') {
+    const text = String(message || '').trim();
+    if (!text) {
+      return false;
+    }
+
+    return this.isEditRequest(text)
+      || /\b(read|show|open|display|print|summarize|explain|review|inspect|check|verify)\b[\s\S]*\b(file|current file|open file|active file|readme|index|route|api|code|function|class)\b/i.test(text)
+      || /\b(list|show|find|search|grep)\b[\s\S]*\b(files?|workspace|repo|repository|project|routes?|api|text|for)\b/i.test(text)
+      || /\b(git|commit|diff|status|log|branch|checkout|push|pull)\b/i.test(text)
+      || /\b(run|execute|shell|terminal|command|npm|pnpm|yarn|node|python|pytest|test suite|build)\b/i.test(text)
+      || /\b(current|active|open)\s+(file|tab|editor)\b/i.test(text);
+  }
+
+  shouldUseBridgeToolLoop(session, message = '') {
+    if (this.shouldUseDirectVisionAnswer(session, message)) {
+      return false;
+    }
+    if (!this.isWorkspaceToolRequest(message)) {
+      return false;
+    }
     const agentRuntime = this.getAgentRuntime(session);
     return ['model_tools', 'bridge_tools'].includes(agentRuntime.execution_class);
   }
@@ -444,7 +534,7 @@ export class ChatSessionService {
     }
   }
 
-  buildExecInvocation({ session, prompt, imagePaths = [], useResume = true }) {
+  buildExecInvocation({ session, prompt, imagePaths = [], useResume = true, forcePromptStdin = false }) {
     const workspaceRoot = this.deps.getConfiguredWorkspaceRoot();
     const baseArgs = [
       'exec',
@@ -456,7 +546,16 @@ export class ChatSessionService {
       workspaceRoot,
     ];
     const promptText = String(prompt || '');
-    const usePromptStdin = promptText.length > ChatSessionService.MAX_INLINE_EXEC_PROMPT_CHARS;
+    const usePromptStdin = forcePromptStdin || promptText.length > ChatSessionService.MAX_INLINE_EXEC_PROMPT_CHARS;
+    const appendPromptArg = (args) => {
+      if (usePromptStdin) {
+        return imagePaths.length > 0 ? [...args, '--', '-'] : [...args, '-'];
+      }
+      if (imagePaths.length > 0) {
+        return [...args, '--', promptText];
+      }
+      return [...args, promptText];
+    };
 
     if (useResume && session.threadId) {
       const resumeArgs = [...baseArgs, 'resume'];
@@ -464,7 +563,7 @@ export class ChatSessionService {
         resumeArgs.push('-i', imagePath);
       });
       return {
-        args: usePromptStdin ? [...resumeArgs, session.threadId] : [...resumeArgs, session.threadId, promptText],
+        args: appendPromptArg([...resumeArgs, session.threadId]),
         stdinText: usePromptStdin ? promptText : '',
       };
     }
@@ -474,7 +573,7 @@ export class ChatSessionService {
     });
 
     return {
-      args: usePromptStdin ? baseArgs : [...baseArgs, promptText],
+      args: appendPromptArg(baseArgs),
       stdinText: usePromptStdin ? promptText : '',
     };
   }
@@ -486,13 +585,13 @@ export class ChatSessionService {
 
     const text = String(stdinText || '');
     if (text) {
-      child.stdin.write(text);
+      child.stdin.write(text.endsWith('\n') ? text : `${text}\n`);
     }
     child.stdin.end();
   }
 
   async runChatTurn(session, message) {
-    if (this.shouldUseBridgeToolLoop(session)) {
+    if (this.shouldUseBridgeToolLoop(session, message)) {
       return this.runChatTurnViaBridgeLocalTools(session, message);
     }
 
@@ -629,7 +728,7 @@ export class ChatSessionService {
           const timeoutError = trimmedStderr === '' && code === null
             ? `Codex timed out after ${Math.round(this.deps.chatTurnTimeoutMs / 1000)} seconds.`
             : '';
-          finish(new Error((trimmedStderr || timeoutError || `Codex exited with code ${code ?? 1}`).trim()));
+          finish(new Error((timeoutError || this.buildCodexExitErrorMessage(code, stderr, stdout, assistantText)).trim()));
           return;
         }
 
@@ -652,7 +751,13 @@ export class ChatSessionService {
       throw new Error('Canceled by user.');
     }
 
-    const invocation = this.buildExecInvocation({ session, prompt, imagePaths, useResume: false });
+    const invocation = this.buildExecInvocation({
+      session,
+      prompt,
+      imagePaths,
+      useResume: false,
+      forcePromptStdin: true,
+    });
     const child = await this.deps.spawnCodex(invocation.args, {
       allowStdin: Boolean(invocation.stdinText),
     });
@@ -724,7 +829,7 @@ export class ChatSessionService {
         }
 
         if (code !== 0) {
-          reject(new Error((String(stderr || '').trim() || `Codex exited with code ${code ?? 1}`).trim()));
+          reject(new Error(this.buildCodexExitErrorMessage(code, stderr, stdout, assistantText)));
           return;
         }
 
@@ -995,16 +1100,41 @@ export class ChatSessionService {
     const toolList = summarizeLocalToolProtocol();
     const activeFile = this.getContextActiveFile(session);
     const contextSummary = summarizeContext(session?.context || {});
+    const attachments = Array.isArray(session?.pendingAttachments) ? session.pendingAttachments : [];
+    const effectiveMessage = String(message || '').trim() || (attachments.length
+      ? 'Please inspect the attached image or file and answer using what you see.'
+      : '');
+    const attachmentNotes = attachments.length
+      ? [
+          'Current turn attachments:',
+          ...attachments.map((attachment, index) => {
+            const name = String(attachment?.name || `attachment-${index + 1}`).trim();
+            const mimeType = String(attachment?.mime_type || attachment?.mimeType || '').trim();
+            return `- Attachment ${index + 1}: ${name}${mimeType ? ` (${mimeType})` : ''}`;
+          }),
+          'Attached images are supplied to this model invocation. Inspect them carefully and answer using what you see.',
+          'If the user asks to add/use an attachment in project files, first call save_attachment with a workspace path such as assets/hero.png, then update the referencing file.',
+          'For website/UI requests such as "add this hero", treat the attachment as a visual design reference and asset. Build a polished responsive section that reflects the image style, content, colors, hierarchy, and Bootstrap conventions; do not merely insert a bare <img> tag.',
+          'Do not answer that you cannot view images merely because this is the bridge planner prompt.',
+        ].join('\n')
+      : '';
     const conversation = (Array.isArray(session.messages) ? session.messages : [])
       .slice(-8)
-      .map((entry) => `${String(entry.role || 'assistant').toUpperCase()}:\n${String(entry.text || '').trim()}`)
+      .map((entry) => {
+        const role = String(entry.role || 'assistant').toUpperCase();
+        const text = String(entry.text || '').trim();
+        if (role === 'USER' && !text && Array.isArray(entry.attachments) && entry.attachments.length) {
+          return `${role}:\n${effectiveMessage}`;
+        }
+        return `${role}:\n${text}`;
+      })
       .join('\n\n');
     const toolTranscript = toolHistory.length
       ? toolHistory.map((step, index) => [
           `Tool step ${index + 1}:`,
           `- tool: ${step.tool}`,
-          `- input: ${JSON.stringify(step.input)}`,
-          `- result: ${JSON.stringify(step.result)}`,
+          `- input: ${this.stringifyPlannerToolValue(step.input, 4000)}`,
+          `- result: ${this.stringifyPlannerToolValue(step.result)}`,
         ].join('\n')).join('\n\n')
       : 'No tools have been executed yet in this turn.';
 
@@ -1025,6 +1155,8 @@ export class ChatSessionService {
       '- Use read_directory, find_files, stat_file, and path_exists to understand the workspace before making structural changes.',
       '- Use write_file to replace full file contents when needed.',
       '- Use append_file to add content to the end of a file.',
+      '- Use save_attachment when the user wants to add a pasted/uploaded attachment into the project. Do not use read_file on attachment names like image.png; attachments are not workspace files until saved.',
+      '- For Bootstrap/HTML hero requests with an attachment, save the attachment, read the existing HTML, then use replace_in_file or write_file to create a complete responsive hero section with meaningful layout, copy, image treatment, and Bootstrap classes. A single bare <img> insert is not sufficient.',
       '- Use replace_in_file for precise local edits, but only after you know the exact old_text currently in the file.',
       '- Use remove_lines_in_file for requests like remove/delete line 3. Never use delete_file for line edits.',
       '- Use replace_lines_in_file for requests that replace a complete line or range of lines.',
@@ -1046,9 +1178,10 @@ export class ChatSessionService {
       '- If an edit tool fails because required input is missing or the target text is not found, inspect the file and try again with a better tool input.',
       activeFile?.path ? `Active editor target file: ${activeFile.path}` : '',
       contextSummary ? `Workspace/VS Code context:\n${contextSummary}` : '',
+      attachmentNotes,
       '- If the user references the visible/current/editor file or pastes editor contents without naming a path, use the Active editor target file. Do not invent placeholder paths like file.md.',
       'Current conversation:',
-      conversation || `USER:\n${message}`,
+      conversation || `USER:\n${effectiveMessage}`,
       'Current turn tool transcript:',
       toolTranscript,
       'Decide the next single step now.',
@@ -1056,7 +1189,11 @@ export class ChatSessionService {
   }
 
   requiresLocalApproval(toolName) {
-    return ChatSessionService.MUTATING_TOOL_NAMES.has(String(toolName || '').trim());
+    const normalizedToolName = String(toolName || '').trim();
+    if (normalizedToolName === 'save_attachment') {
+      return false;
+    }
+    return ChatSessionService.MUTATING_TOOL_NAMES.has(normalizedToolName);
   }
 
   getUnresolvedFailedMutatingTool(toolHistory = []) {
@@ -1127,8 +1264,14 @@ export class ChatSessionService {
     if (step?.result?.ok !== true || !ChatSessionService.MUTATING_TOOL_NAMES.has(toolName)) {
       return false;
     }
+    if (toolName === 'save_attachment') {
+      return false;
+    }
 
     const userText = String(message || '');
+    if (this.isHeroDesignAttachmentRequest(userText, toolHistory) && this.isBareHeroImageInsert(step)) {
+      return false;
+    }
     const moveIntent = /\b(move|relocate|reposition)\b/i.test(userText);
     if (!moveIntent) {
       return this.isEditRequest(userText);
@@ -1145,6 +1288,25 @@ export class ChatSessionService {
     }
 
     return false;
+  }
+
+  isHeroDesignAttachmentRequest(message = '', toolHistory = []) {
+    const userText = String(message || '');
+    const heroIntent = /\b(hero|landing|homepage|home page|website|web\s*page|bootstrap|design|mockup|screenshot)\b/i.test(userText);
+    if (!heroIntent) {
+      return false;
+    }
+    return toolHistory.some((step) => String(step?.tool || '').trim() === 'save_attachment' && step?.result?.ok === true);
+  }
+
+  isBareHeroImageInsert(step = {}) {
+    const toolName = String(step?.tool || '').trim();
+    if (toolName !== 'insert_in_file') {
+      return false;
+    }
+    const input = step.input && typeof step.input === 'object' ? step.input : {};
+    const text = String(input.text || input.content || input.insert_text || input.insertText || '').trim();
+    return /^<img\b[^>]*>\s*$/i.test(text) || (text.length < 240 && /^<[^>]+>\s*$/i.test(text) && /\bhero\.(?:png|jpe?g|webp|gif)\b/i.test(text));
   }
 
   getAutoFinalMessageAfterSuccessfulTool(message = '', toolHistory = [], requestedInsertLineTarget = null, requestedSentenceTarget = null) {
@@ -1647,6 +1809,12 @@ export class ChatSessionService {
       }
     }
 
+    if (normalizedToolName === 'save_attachment') {
+      if (!String(record.path || '').trim()) {
+        return 'save_attachment requires a path.';
+      }
+    }
+
     if (normalizedToolName === 'replace_lines_in_file') {
       const lineNumber = Number.parseInt(String(record.line_number || record.lineNumber || record.line || record.start_line || record.startLine || ''), 10) || 0;
       const hasText = Object.prototype.hasOwnProperty.call(record, 'text')
@@ -1949,8 +2117,12 @@ export class ChatSessionService {
     }
 
     const tempImagePaths = await materializeImageAttachments(attachments, this.deps.bridgeTempRoot);
+    if (attachments.length || tempImagePaths.length) {
+      this.logPlanner(session, `attachments=${attachments.length} materialized_images=${tempImagePaths.length}`);
+    }
     const toolExecutor = new LocalToolExecutor({
       workspaceRoot: this.deps.getConfiguredWorkspaceRoot(),
+      attachments,
     });
 
     const directToolAnswer = await this.buildDirectWorkspaceToolAnswer(session, message, toolExecutor);
@@ -2159,7 +2331,9 @@ export class ChatSessionService {
         );
         this.appendSessionEvent(session, {
           type: 'bridge.planner.step',
-          preview: decision.explanation || `Running ${decision.tool}`,
+          preview: decision.tool === 'save_attachment'
+            ? 'Saving attached image...'
+            : (decision.explanation || `Running ${decision.tool}`),
           tool: {
             name: decision.tool,
             input: decision.input || {},

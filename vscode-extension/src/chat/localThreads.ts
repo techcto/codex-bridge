@@ -5,7 +5,27 @@ import type {
   OsirusChatHistoryMessage,
   OsirusModelOption,
   RuntimeProvider,
+  WebviewAttachment,
 } from '../types';
+
+function sanitizeWebviewAttachment(value: any): WebviewAttachment | null {
+  const dataUrl = String(value?.dataUrl || value?.data_url || '').trim();
+  const name = String(value?.name || 'Attachment').trim() || 'Attachment';
+  if (!dataUrl) {
+    return null;
+  }
+
+  const mimeType = String(value?.mimeType || value?.mime_type || 'application/octet-stream').trim() || 'application/octet-stream';
+  const sizeBytes = Number(value?.sizeBytes || value?.size || value?.size_bytes || 0) || 0;
+  return {
+    id: String(value?.id || name).trim() || name,
+    name,
+    mimeType,
+    sizeBytes,
+    dataUrl,
+    kind: value?.kind === 'file' ? 'file' : (mimeType.startsWith('image/') ? 'image' : 'file'),
+  };
+}
 
 export function sanitizeLocalChatMessage(
   value: any,
@@ -17,7 +37,12 @@ export function sanitizeLocalChatMessage(
   const role = options.normalizeRole(value?.role);
   const content = String(value?.content || '').trim();
   const thinking = String(value?.thinking || '').trim();
-  if (!role || (!content && !thinking)) {
+  const attachments = Array.isArray(value?.attachments)
+    ? value.attachments
+      .map((attachment: any) => sanitizeWebviewAttachment(attachment))
+      .filter((attachment: WebviewAttachment | null): attachment is WebviewAttachment => Boolean(attachment))
+    : [];
+  if (!role || (!content && !thinking && !attachments.length)) {
     return null;
   }
 
@@ -25,6 +50,7 @@ export function sanitizeLocalChatMessage(
     id: String(value?.id || options.createLocalId('msg')).trim(),
     role,
     content,
+    attachments: attachments.length ? attachments : undefined,
     thinking: thinking || undefined,
     createdAt: Number(value?.createdAt || value?.created_at || Date.now()) || Date.now(),
   };

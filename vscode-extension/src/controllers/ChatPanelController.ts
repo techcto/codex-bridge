@@ -220,9 +220,9 @@ export class ChatPanelController {
       id: this.deps.createLocalId('msg'),
       role: 'user',
       content: prompt || this.describeAttachments(attachments),
+      attachments,
       createdAt: Date.now(),
     };
-    activeThread = await this.deps.appendStoredThreadMessage(activeThread.id, userMessage);
 
     const modelSelectionId = runtimeProvider === 'osirus'
       ? String(message.modelSelectionId || activeThread.selectedModelId || '').trim()
@@ -368,6 +368,11 @@ export class ChatPanelController {
         chatContext
       );
     }
+    activeThread = await this.deps.appendStoredThreadMessage(activeThread.id, userMessage, {
+      sessionId: activeSessionId,
+      osirusChatId: runtimeProvider === 'osirus' ? (submittedOsirusChatId || activeThread.osirusChatId) : activeThread.osirusChatId,
+      selectedModelId: runtimeProvider === 'osirus' ? (modelSelectionId || activeThread.selectedModelId) : activeThread.selectedModelId,
+    });
 
     panel.webview.postMessage({ type: 'status', value: 'Waiting for Codex reply...' });
     let streamedAssistantText = '';
@@ -602,6 +607,9 @@ export class ChatPanelController {
     const tool = event.tool && typeof event.tool === 'object' ? event.tool as Record<string, unknown> : {};
     const result = tool.result && typeof tool.result === 'object' ? tool.result as Record<string, unknown> : {};
     const toolName = String(tool.name || result.tool || '').trim();
+    if (toolName === 'save_attachment') {
+      return '';
+    }
     const lineNumber = Number(result.line_number || 0) || 0;
     const path = String(
       result.path

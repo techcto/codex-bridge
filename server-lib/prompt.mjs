@@ -122,11 +122,21 @@ export function summarizeContext(context = {}) {
 export function buildCodexPrompt({ session, message, attachments = [] }) {
   const contextSummary = summarizeContext(session.context);
   const agentRuntimeNotes = buildAgentRuntimePromptNotes(session.context?.agent_runtime || {});
+  const effectiveMessage = String(message || '').trim() || (attachments.length
+    ? 'Please inspect the attached image or file and answer using what you see.'
+    : '');
+  const imageHtmlRequest = attachments.length > 0 && (
+    /\b(convert|recreate|turn|generate|make|build|code)\b[\s\S]*\b(image|screenshot|mockup|design|hero)\b[\s\S]*\b(html|bootstrap|css|page|website)\b/i.test(effectiveMessage)
+    || /\b(image|screenshot|mockup|design|hero)\b[\s\S]*\b(to|into|as)\b[\s\S]*\b(html|bootstrap|css|page|website)\b/i.test(effectiveMessage)
+  );
   const attachmentNotes = attachments.length
     ? [
         'The user attached supplemental assets to this prompt.',
         ...attachments.map((attachment, index) => `Attachment ${index + 1}: ${attachment.name || `image-${index + 1}`}${attachment.mime_type ? ` (${attachment.mime_type})` : ''}`),
-        'If an attached image is present, inspect it carefully and treat it as part of the user request.',
+        'Attached images are available to the model invocation. Inspect them carefully and treat them as part of the user request.',
+        imageHtmlRequest
+          ? 'If asked to convert an attached image/screenshot/design to HTML or Bootstrap, produce a polished responsive Bootstrap implementation that recreates the visible layout, spacing, hierarchy, colors, and components. Do not answer that you cannot view the image.'
+          : '',
       ].join('\n')
     : '';
 
@@ -155,6 +165,6 @@ export function buildCodexPrompt({ session, message, attachments = [] }) {
     agentRuntimeNotes,
     attachmentNotes,
     contextSummary ? `Workspace context:\n${contextSummary}` : '',
-    `User request:\n${message}`,
+    `User request:\n${effectiveMessage}`,
   ].filter(Boolean).join('\n\n');
 }
